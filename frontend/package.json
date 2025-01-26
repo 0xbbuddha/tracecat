@@ -72,7 +72,7 @@
     "react-dom": "^18.3.1",
     "react-hook-form": "^7.51.4",
     "react-resizable-panels": "^1.0.10",
-    "react-spinners": "^0.13.8",
+    "react-spinners": "^0.15.0",
     "react-syntax-highlighter": "^15.5.0",
     "react-use-websocket": "^4.8.1",
     "react18-json-view": "^0.2.8",
