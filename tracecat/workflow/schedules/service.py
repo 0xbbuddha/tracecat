@@ -6,19 +6,19 @@ from sqlalchemy.exc import NoResultFound
 from sqlmodel import select
 from temporalio import activity
 
-from tracecat.db.schemas import Schedule
+from tracecat.auth.types import AccessLevel
+from tracecat.db.models import Schedule
 from tracecat.db.session_events import add_after_commit_callback
+from tracecat.exceptions import (
+    TracecatAuthorizationError,
+    TracecatNotFoundError,
+)
 from tracecat.identifiers import ScheduleID, WorkflowID
 from tracecat.identifiers.workflow import WorkflowUUID
 from tracecat.logger import logger
 from tracecat.service import BaseService
-from tracecat.types.auth import AccessLevel
-from tracecat.types.exceptions import (
-    TracecatAuthorizationError,
-    TracecatNotFoundError,
-)
 from tracecat.workflow.schedules import bridge
-from tracecat.workflow.schedules.models import (
+from tracecat.workflow.schedules.schemas import (
     GetScheduleActivityInputs,
     ScheduleCreate,
     ScheduleRead,
@@ -110,6 +110,7 @@ class WorkflowSchedulesService(BaseService):
                 handle = await bridge.create_schedule(
                     workflow_id=WorkflowUUID.new(params.workflow_id),
                     schedule_id=schedule_id,
+                    cron=params.cron,
                     every=params.every,
                     offset=params.offset,
                     start_at=params.start_at,

@@ -1,4 +1,4 @@
-from tracecat.agent.models import (
+from tracecat.agent.schemas import (
     ModelConfig,
     ProviderCredentialConfig,
     ProviderCredentialField,
@@ -7,24 +7,48 @@ from tracecat.agent.models import (
 # https://ai.pydantic.dev/api/models/base/
 MODEL_CONFIGS = {
     # Maps the pydantic-ai model name to the Tracecat model config
-    "o4-mini": ModelConfig(
-        name="o4-mini",
+    "gpt-4o-mini": ModelConfig(
+        name="gpt-4o-mini",
         provider="openai",
         org_secret_name="agent-openai-credentials",
         secrets={
             "required": ["openai"],
         },
     ),
-    "claude-3-5-sonnet-20240620": ModelConfig(
-        name="claude-3-5-sonnet-20240620",
+    "claude-sonnet-4-5-20250929": ModelConfig(
+        name="claude-sonnet-4-5-20250929",
         provider="anthropic",
         org_secret_name="agent-anthropic-credentials",
         secrets={
             "required": ["anthropic"],
         },
     ),
-    "us.anthropic.claude-3-7-sonnet-20250219-v1:0": ModelConfig(
-        name="us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+    "claude-haiku-4-5-20251001": ModelConfig(
+        name="claude-haiku-4-5-20251001",
+        provider="anthropic",
+        org_secret_name="agent-anthropic-credentials",
+        secrets={
+            "required": ["anthropic"],
+        },
+    ),
+    "anthropic.claude-sonnet-4-5-20250929-v1:0": ModelConfig(
+        name="anthropic.claude-sonnet-4-5-20250929-v1:0",
+        provider="bedrock",
+        org_secret_name="agent-bedrock-credentials",
+        secrets={
+            "required": ["bedrock"],
+        },
+    ),
+    "anthropic.claude-haiku-4-5-20251001-v1:0": ModelConfig(
+        name="anthropic.claude-haiku-4-5-20251001-v1:0",
+        provider="bedrock",
+        org_secret_name="agent-bedrock-credentials",
+        secrets={
+            "required": ["bedrock"],
+        },
+    ),
+    "openai.gpt-oss-120b-1:0": ModelConfig(
+        name="openai.gpt-oss-120b-1:0",
         provider="bedrock",
         org_secret_name="agent-bedrock-credentials",
         secrets={
@@ -68,7 +92,7 @@ PROVIDER_CREDENTIAL_CONFIGS = {
     ),
     "bedrock": ProviderCredentialConfig(
         provider="bedrock",
-        label="Anthropic (Bedrock)",
+        label="AWS Bedrock",
         fields=[
             ProviderCredentialField(
                 key="AWS_ACCESS_KEY_ID",

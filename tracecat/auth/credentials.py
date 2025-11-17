@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from contextlib import contextmanager
 from functools import partial
 from typing import Annotated, Any, Literal
@@ -21,16 +22,16 @@ from pydantic import UUID4
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from tracecat import config
-from tracecat.auth.models import UserRole
+from tracecat.auth.schemas import UserRole
+from tracecat.auth.types import AccessLevel, Role
 from tracecat.auth.users import is_unprivileged, optional_current_active_user
-from tracecat.authz.models import WorkspaceRole
+from tracecat.authz.enums import WorkspaceRole
 from tracecat.authz.service import MembershipService
 from tracecat.contexts import ctx_role
 from tracecat.db.dependencies import AsyncDBSession
-from tracecat.db.schemas import User
+from tracecat.db.models import User
 from tracecat.identifiers import InternalServiceID
 from tracecat.logger import logger
-from tracecat.types.auth import AccessLevel, Role
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
 api_key_header_scheme = APIKeyHeader(name="x-tracecat-service-key", auto_error=False)
@@ -90,7 +91,11 @@ async def _authenticate_service(
         msg = f"x-tracecat-role-service-id {service_role_id!r} invalid or not allowed"
         logger.error(msg)
         raise HTTP_EXC(msg)
-    if api_key != os.environ["TRACECAT__SERVICE_KEY"]:
+    try:
+        expected_key = os.environ["TRACECAT__SERVICE_KEY"]
+    except KeyError as e:
+        raise KeyError("TRACECAT__SERVICE_KEY is not set") from e
+    if not secrets.compare_digest(api_key, expected_key):
         logger.error("Could not validate service key")
         raise CREDENTIALS_EXCEPTION
     role_params = {

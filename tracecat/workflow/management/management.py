@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 from sqlmodel import and_, cast, col, select
 from temporalio import activity
 
-from tracecat.db.schemas import (
+from tracecat.db.models import (
     Action,
     Tag,
     Webhook,
@@ -20,40 +20,40 @@ from tracecat.db.schemas import (
     WorkflowTag,
 )
 from tracecat.dsl.common import DSLEntrypoint, DSLInput, build_action_statements
-from tracecat.dsl.models import DSLConfig
+from tracecat.dsl.schemas import DSLConfig
 from tracecat.dsl.view import RFGraph
+from tracecat.exceptions import (
+    TracecatAuthorizationError,
+    TracecatValidationError,
+)
 from tracecat.identifiers import WorkflowID
 from tracecat.identifiers.workflow import (
     LEGACY_WF_ID_PATTERN,
     WF_ID_SHORT_PATTERN,
     WorkflowUUID,
 )
-from tracecat.service import BaseService
-from tracecat.types.exceptions import (
-    TracecatAuthorizationError,
-    TracecatValidationError,
-)
-from tracecat.types.pagination import (
+from tracecat.pagination import (
     BaseCursorPaginator,
     CursorPaginatedResponse,
     CursorPaginationParams,
 )
-from tracecat.validation.models import (
+from tracecat.service import BaseService
+from tracecat.validation.schemas import (
     DSLValidationResult,
     ValidationDetail,
     ValidationResult,
 )
 from tracecat.validation.service import validate_dsl
-from tracecat.workflow.actions.models import ActionControlFlow
-from tracecat.workflow.management.models import (
+from tracecat.workflow.actions.schemas import ActionControlFlow
+from tracecat.workflow.management.schemas import (
     ExternalWorkflowDefinition,
     GetErrorHandlerWorkflowIDActivityInputs,
     ResolveWorkflowAliasActivityInputs,
     WorkflowCreate,
-    WorkflowDefinitionMinimal,
     WorkflowDSLCreateResponse,
     WorkflowUpdate,
 )
+from tracecat.workflow.management.types import WorkflowDefinitionMinimal
 from tracecat.workflow.schedules import bridge
 from tracecat.workflow.schedules.service import WorkflowSchedulesService
 
@@ -312,7 +312,9 @@ class WorkflowsManagementService(BaseService):
             )
             .options(
                 selectinload(Workflow.actions),  # type: ignore
-                selectinload(Workflow.webhook),  # type: ignore
+                selectinload(Workflow.webhook).options(  # type: ignore
+                    selectinload(Webhook.api_key)  # type: ignore
+                ),
                 selectinload(Workflow.schedules),  # type: ignore
             )
         )
@@ -510,7 +512,6 @@ class WorkflowsManagementService(BaseService):
             description=workflow.description,
             entrypoint=DSLEntrypoint(expects=workflow.expects),
             actions=action_statements,
-            inputs=workflow.static_inputs,
             config=DSLConfig(**workflow.config),
             returns=workflow.returns,
             error_handler=workflow.error_handler,
@@ -561,7 +562,6 @@ class WorkflowsManagementService(BaseService):
             "title": dsl.title,
             "description": dsl.description,
             "owner_id": self.role.workspace_id,
-            "static_inputs": dsl.inputs,
             "returns": dsl.returns,
             "config": dsl.config.model_dump(),
             "expects": entrypoint.get("expects"),

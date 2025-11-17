@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -6,10 +6,13 @@ import pytest
 from sqlalchemy.exc import DBAPIError, StatementError
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from tracecat.db.schemas import Table
+from tracecat.auth.types import Role
+from tracecat.db.models import Table
+from tracecat.exceptions import TracecatNotFoundError
 from tracecat.logger import logger
+from tracecat.tables.common import parse_postgres_default
 from tracecat.tables.enums import SqlType
-from tracecat.tables.models import (
+from tracecat.tables.schemas import (
     TableColumnCreate,
     TableColumnUpdate,
     TableCreate,
@@ -17,8 +20,6 @@ from tracecat.tables.models import (
     TableUpdate,
 )
 from tracecat.tables.service import TablesService
-from tracecat.types.auth import Role
-from tracecat.types.exceptions import TracecatNotFoundError
 
 pytestmark = pytest.mark.usefixtures("db")
 
@@ -136,6 +137,94 @@ class TestTablesService:
                 assert col.nullable is True
                 assert col.default == "0"  # Default values are stored as strings
 
+    async def test_import_table_from_csv(self, tables_service: TablesService) -> None:
+        """Importing a CSV should create table, columns, and rows."""
+        csv_content = "\n".join(
+            [
+                "Full Name,Age,Active,Joined",
+                "Alice,30,true,2024-01-01T12:00:00Z",
+                "Bob,25,false,2024-01-02",
+            ]
+        )
+
+        (
+            table,
+            rows_inserted,
+            inferred_columns,
+        ) = await tables_service.import_table_from_csv(
+            contents=csv_content.encode(),
+            filename="People.csv",
+        )
+
+        assert table.name == "people"
+        assert rows_inserted == 2
+        mapping = {col.original_name: col.name for col in inferred_columns}
+        assert mapping["Full Name"] == "fullname"
+        assert mapping["Age"] == "age"
+        assert mapping["Active"] == "active"
+
+        retrieved_table = await tables_service.get_table(table.id)
+        rows = await tables_service.list_rows(retrieved_table)
+        assert len(rows) == 2
+        rows_by_name = {row["fullname"]: row for row in rows}
+        assert rows_by_name.keys() == {"Alice", "Bob"}
+        assert isinstance(rows_by_name["Alice"]["age"], int)
+        assert isinstance(rows_by_name["Alice"]["active"], bool)
+        assert isinstance(rows_by_name["Bob"]["age"], int)
+        assert isinstance(rows_by_name["Bob"]["active"], bool)
+
+        second_table, _, _ = await tables_service.import_table_from_csv(
+            contents=csv_content.encode(),
+            filename="People.csv",
+        )
+        assert second_table.name == "people_1"
+
+    async def test_import_table_handles_empty_numeric_values(
+        self, tables_service: TablesService
+    ) -> None:
+        """Empty cells in numeric columns should be treated as NULL."""
+        csv_content = "\n".join(
+            [
+                "Name,Age",
+                "Alice,",
+                "Bob,42",
+            ]
+        )
+
+        table, _, _ = await tables_service.import_table_from_csv(
+            contents=csv_content.encode(),
+            filename="Ages.csv",
+        )
+
+        retrieved_table = await tables_service.get_table(table.id)
+        rows = await tables_service.list_rows(retrieved_table)
+        assert len(rows) == 2
+        rows_by_name = {row["name"]: row for row in rows}
+        assert rows_by_name["Alice"]["age"] is None
+        assert rows_by_name["Bob"]["age"] == 42
+
+    async def test_import_table_from_csv_honors_chunk_size(
+        self, tables_service: TablesService
+    ) -> None:
+        """Imports should allow larger chunk sizes without hitting the default cap."""
+
+        header = "name"
+        total_rows = 1500
+        rows = [f"row_{i}" for i in range(total_rows)]
+        csv_content = "\n".join([header, *rows])
+
+        table, inserted, _ = await tables_service.import_table_from_csv(
+            contents=csv_content.encode(),
+            filename="Large.csv",
+            chunk_size=total_rows,
+        )
+
+        assert inserted == total_rows
+
+        retrieved_table = await tables_service.get_table(table.id)
+        actual_rows = await tables_service.list_rows(retrieved_table, limit=total_rows)
+        assert len(actual_rows) == total_rows
+
     async def test_update_table(self, tables_service: TablesService) -> None:
         """Test updating table metadata."""
         # Create table
@@ -163,6 +252,57 @@ class TestTablesService:
         # Attempt to retrieve the table; should raise TracecatNotFoundError
         with pytest.raises(TracecatNotFoundError):
             await tables_service.get_table_by_name("deletable_table")
+
+    async def test_create_column_rejects_plain_timestamp(
+        self, tables_service: TablesService
+    ) -> None:
+        """Ensure TIMESTAMP is not allowed for user-defined columns."""
+        table = await tables_service.create_table(TableCreate(name="reject_ts"))
+
+        with pytest.raises(ValueError, match="Invalid type: TIMESTAMP"):
+            await tables_service.create_column(
+                table,
+                TableColumnCreate(
+                    name="legacy_ts",
+                    type=SqlType.TIMESTAMP,
+                ),
+            )
+
+
+class TestParsePostgresDefault:
+    @pytest.fixture
+    def parse_default(self):
+        return parse_postgres_default
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            (None, None),
+            ("'attack'::text", "attack"),
+            ("0::integer", "0"),
+            ("true::boolean", "true"),
+            ("'2024-01-01'::timestamp", "2024-01-01"),
+            ("'2024-01-01 00:00:00+00'::timestamptz", "2024-01-01 00:00:00+00"),
+            ("'foo'::pg_catalog.text", "foo"),
+            ("'bar'::character varying", "bar"),
+            ("'X'::text[]", "X"),
+            ("'keep::inside'::text", "keep::inside"),
+            ("'double'::text::text", "double"),
+            ("'endswith::'::text", "endswith::"),
+            ("'yes'", "yes"),
+            ("42", "42"),
+            # Should not strip inner casts when not at end
+            ("nextval('seq'::regclass)", "nextval('seq'::regclass)"),
+            # Should strip only a trailing cast on the whole expression
+            ("nextval('seq'::regclass)::text", "nextval('seq'::regclass)"),
+            # Trailing whitespace after cast should still be removed
+            ("'abc'::text   ", "abc"),
+        ],
+    )
+    def test_parse_postgres_default_variants(
+        self, parse_default, raw: str | None, expected: str | None
+    ) -> None:
+        assert parse_default(raw) == expected
 
 
 @pytest.mark.anyio
@@ -767,7 +907,6 @@ class TestTableDataTypes:
             TableColumnCreate(name="numeric_col", type=SqlType.NUMERIC),
             TableColumnCreate(name="bool_col", type=SqlType.BOOLEAN),
             TableColumnCreate(name="json_col", type=SqlType.JSONB),
-            TableColumnCreate(name="timestamp_col", type=SqlType.TIMESTAMP),
             TableColumnCreate(name="timestamptz_col", type=SqlType.TIMESTAMPTZ),
             TableColumnCreate(name="uuid_col", type=SqlType.UUID),
         ]
@@ -784,8 +923,8 @@ class TestTableDataTypes:
         """Test inserting and retrieving values of all supported SQL types."""
         # Test data for each type
         test_uuid = uuid4()
-        test_timestamp = datetime(2024, 2, 24, 12, 0)
-        test_datetime_tz = datetime(2024, 2, 24, 12, 0, tzinfo=UTC)
+        naive_timestamp = datetime(2024, 2, 24, 12, 0)
+        expected_timestamp = naive_timestamp.replace(tzinfo=UTC)
         test_json = {"key": "value", "nested": {"list": [1, 2, 3]}}
 
         # Create test data covering all types
@@ -795,8 +934,7 @@ class TestTableDataTypes:
             "numeric_col": Decimal("3.14159"),
             "bool_col": True,
             "json_col": test_json,
-            "timestamp_col": test_timestamp,
-            "timestamptz_col": test_datetime_tz,
+            "timestamptz_col": naive_timestamp,
             "uuid_col": test_uuid,
         }
 
@@ -817,15 +955,60 @@ class TestTableDataTypes:
         assert retrieved["json_col"] == test_json
 
         # DateTime comparisons
-        retrieved_timestamp = retrieved["timestamp_col"]
         retrieved_timestamptz = retrieved["timestamptz_col"]
-        assert isinstance(retrieved_timestamp, datetime)
         assert isinstance(retrieved_timestamptz, datetime)
-        assert retrieved_timestamp == test_timestamp
-        assert retrieved_timestamptz == test_datetime_tz
+        assert retrieved_timestamptz == expected_timestamp
+        assert retrieved_timestamptz.tzinfo == UTC
 
         # UUID comparison
         assert str(retrieved["uuid_col"]) == str(test_uuid)
+
+    async def test_timestamptz_normalisation(
+        self, tables_service: TablesService, complex_table: Table
+    ) -> None:
+        """Ensure TIMESTAMPTZ values are normalised to UTC on insert and update."""
+        naive_value = datetime(2024, 3, 1, 10, 30)
+        inserted = await tables_service.insert_row(
+            complex_table, TableRowInsert(data={"timestamptz_col": naive_value})
+        )
+
+        expected_insert_value = naive_value.replace(tzinfo=UTC)
+        assert inserted["timestamptz_col"] == expected_insert_value
+
+        row_id = inserted["id"]
+        offset_zone = timezone(timedelta(hours=-5))
+        aware_value = datetime(2024, 3, 1, 5, 30, tzinfo=offset_zone)
+        updated = await tables_service.update_row(
+            complex_table, row_id, {"timestamptz_col": aware_value}
+        )
+        expected_update_value = aware_value.astimezone(UTC)
+        assert updated["timestamptz_col"] == expected_update_value
+
+        batch_rows = [
+            {"timestamptz_col": datetime(2024, 3, 2, 9, 0)},
+            {
+                "timestamptz_col": datetime(
+                    2024, 3, 2, 6, 0, tzinfo=timezone(timedelta(hours=-3))
+                )
+            },
+        ]
+        affected = await tables_service.batch_insert_rows(complex_table, batch_rows)
+        assert affected == 2
+
+        rows = await tables_service.list_rows(complex_table)
+        # Extract non-null TIMESTAMPTZ values for verification
+        extracted = [row["timestamptz_col"] for row in rows if row["timestamptz_col"]]
+        assert len(extracted) == 3
+        assert all(value.tzinfo == UTC for value in extracted)
+
+        expected_values = sorted(
+            [
+                expected_update_value,
+                datetime(2024, 3, 2, 9, 0, tzinfo=UTC),
+                datetime(2024, 3, 2, 9, 0, tzinfo=UTC),
+            ]
+        )
+        assert sorted(extracted) == expected_values
 
     @pytest.mark.usefixtures("db")
     @pytest.mark.parametrize(
@@ -857,8 +1040,8 @@ class TestTableDataTypes:
             ),
             # Test invalid timestamp
             pytest.param(
-                {"timestamp_col": "not-a-timestamp"},
-                "expected a datetime.date or datetime.datetime instance",
+                {"timestamptz_col": "not-a-timestamp"},
+                "Invalid ISO datetime string: 'not-a-timestamp'",
                 id="invalid_timestamp",
             ),
         ],
@@ -912,12 +1095,9 @@ class TestTableDataTypes:
             "numeric_col": Decimal("0.0"),  # Zero decimal
             "bool_col": False,  # False boolean
             "json_col": {},  # Empty JSON
-            "timestamp_col": datetime(
-                1, 1, 1, 0, 0
-            ),  # Minimum datetime without timezone
             "timestamptz_col": datetime(
                 2025, 3, 15, 12, 0, 0, 0, tzinfo=UTC
-            ),  # Maximum datetime
+            ),  # Arbitrary future datetime
             "uuid_col": UUID("00000000-0000-0000-0000-000000000000"),  # Nil UUID
         }
 
@@ -936,12 +1116,6 @@ class TestTableDataTypes:
         assert retrieved["numeric_col"] == Decimal("0.0")
         assert retrieved["bool_col"] is False
         assert retrieved["json_col"] == {}
-
-        # DateTime comparisons - fix the timezone comparison issue
-        assert (
-            retrieved["timestamp_col"].replace(tzinfo=None)
-            == edge_cases["timestamp_col"]
-        )
 
         # For timestamptz, we need to handle the timezone comparison
         # The database might return a datetime with a different timezone representation

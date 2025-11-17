@@ -6,9 +6,11 @@ from fastapi import HTTPException
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from tracecat.auth.enums import AuthType
+from tracecat.auth.types import Role
 from tracecat.contexts import ctx_role
 from tracecat.settings.constants import SENSITIVE_SETTINGS_KEYS
-from tracecat.settings.models import (
+from tracecat.settings.router import check_other_auth_enabled
+from tracecat.settings.schemas import (
     AuthSettingsUpdate,
     GitSettingsUpdate,
     OAuthSettingsUpdate,
@@ -17,9 +19,7 @@ from tracecat.settings.models import (
     SettingUpdate,
     ValueType,
 )
-from tracecat.settings.router import check_other_auth_enabled
 from tracecat.settings.service import SettingsService, get_setting, get_setting_override
-from tracecat.types.auth import Role
 
 pytestmark = pytest.mark.usefixtures("db")
 
@@ -255,6 +255,9 @@ async def test_git_settings_valid_ssh_urls(
         "git://git@github.com/org/repo.git",  # Missing +ssh
         "not-a-url",  # Not a URL at all
         "",  # Empty string
+        "git+ssh://git@github.com:not_a_port/org/repo.git",  # Non numeric port
+        "git+ssh://git@github.com:/org/repo.git",  # Missing port after colon
+        "git+ssh://git@github.com/repo.git",  # Missing org segment
     ],
 )
 async def test_git_settings_invalid_ssh_urls(

@@ -13,16 +13,16 @@ from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from tracecat import config
-from tracecat.db.schemas import OAuthStateDB, User, Workspace
+from tracecat.auth.types import AccessLevel, Role
+from tracecat.db.models import OAuthStateDB, User, Workspace
 from tracecat.integrations.enums import OAuthGrantType
-from tracecat.integrations.models import (
+from tracecat.integrations.providers.base import AuthorizationCodeOAuthProvider
+from tracecat.integrations.schemas import (
     ProviderKey,
     ProviderMetadata,
     ProviderScopes,
 )
-from tracecat.integrations.providers.base import AuthorizationCodeOAuthProvider
 from tracecat.integrations.service import IntegrationService
-from tracecat.types.auth import AccessLevel, Role
 
 pytestmark = pytest.mark.usefixtures("db")
 
@@ -327,7 +327,8 @@ class TestOAuthState:
             provider_key=provider_key,
             client_id="test_client_id",
             client_secret=SecretStr("test_client_secret"),
-            provider_config={"redirect_uri": "http://localhost:8000/callback"},
+            authorization_endpoint="https://login.example.com/oauth2/v2.0/authorize",
+            token_endpoint="https://login.example.com/oauth2/v2.0/token",
         )
 
         # Ensure role has required fields

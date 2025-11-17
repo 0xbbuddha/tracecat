@@ -1,17 +1,53 @@
 from typing import Final
 
-from tracecat.integrations.models import ProviderKey
 from tracecat.integrations.providers.base import BaseOAuthProvider
-from tracecat.integrations.providers.microsoft.graph import (
+from tracecat.integrations.providers.github.mcp import GitHubMCPProvider
+from tracecat.integrations.providers.github.oauth import GitHubOAuthProvider
+from tracecat.integrations.providers.google import GoogleServiceAccountOAuthProvider
+from tracecat.integrations.providers.linear.mcp import LinearMCPProvider
+from tracecat.integrations.providers.microsoft import (
+    AzureLogAnalyticsACProvider,
+    AzureLogAnalyticsCCProvider,
+    AzureManagementACProvider,
+    AzureManagementCCProvider,
+    MicrosoftDefenderEndpointACProvider,
+    MicrosoftDefenderEndpointCCProvider,
+    MicrosoftDefenderXDRACProvider,
+    MicrosoftDefenderXDRCCProvider,
+    MicrosoftEntraACProvider,
+    MicrosoftEntraCCProvider,
     MicrosoftGraphACProvider,
     MicrosoftGraphCCProvider,
-)
-from tracecat.integrations.providers.microsoft.teams import (
+    MicrosoftSentinelACProvider,
+    MicrosoftSentinelCCProvider,
     MicrosoftTeamsACProvider,
     MicrosoftTeamsCCProvider,
 )
+from tracecat.integrations.providers.notion.mcp import NotionMCPProvider
+from tracecat.integrations.providers.runreveal.mcp import RunRevealMCPProvider
+from tracecat.integrations.providers.sentry.mcp import SentryMCPProvider
+from tracecat.integrations.schemas import ProviderKey
 
 _PROVIDER_CLASSES: list[type[BaseOAuthProvider]] = [
+    GitHubOAuthProvider,
+    GitHubMCPProvider,
+    GoogleServiceAccountOAuthProvider,
+    LinearMCPProvider,
+    NotionMCPProvider,
+    RunRevealMCPProvider,
+    SentryMCPProvider,
+    AzureManagementACProvider,
+    AzureManagementCCProvider,
+    MicrosoftSentinelACProvider,
+    MicrosoftSentinelCCProvider,
+    AzureLogAnalyticsACProvider,
+    AzureLogAnalyticsCCProvider,
+    MicrosoftDefenderEndpointACProvider,
+    MicrosoftDefenderEndpointCCProvider,
+    MicrosoftDefenderXDRACProvider,
+    MicrosoftDefenderXDRCCProvider,
+    MicrosoftEntraACProvider,
+    MicrosoftEntraCCProvider,
     MicrosoftGraphACProvider,
     MicrosoftGraphCCProvider,
     MicrosoftTeamsACProvider,
