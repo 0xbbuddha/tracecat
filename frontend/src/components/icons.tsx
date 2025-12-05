@@ -575,6 +575,7 @@ export const UDFIcons: Record<string, (props: CustomIconProps) => JSX.Element> =
         </svg>
       </div>
     ),
+    "tools.servicenow": createIconRenderer(ServiceNowIcon),
     "tools.slack": createIconRenderer(SlackIcon),
     "tools.slack_blocks": createIconRenderer(SlackIcon),
     "ai.openai": createIconRenderer(OpenAIIcon),
@@ -605,6 +606,29 @@ export const UDFIcons: Record<string, (props: CustomIconProps) => JSX.Element> =
     "tools.azure_log_analytics": ({ className, ...rest }: IconProps) => (
       <div className={cn(basicIconsCommon, className)}>
         <AzureLogAnalyticsIcon {...rest} />
+      </div>
+    ),
+    "tools.google_sheets": ({
+      className,
+      iconClassName,
+      flairsize: _ignored,
+      ...rest
+    }: CustomIconProps) => (
+      <div className={cn(basicIconsCommon, className)}>
+        <GoogleSheetsIcon
+          className={cn("size-full", iconClassName)}
+          {...rest}
+        />
+      </div>
+    ),
+    "tools.google_docs": ({
+      className,
+      iconClassName,
+      flairsize: _ignored,
+      ...rest
+    }: CustomIconProps) => (
+      <div className={cn(basicIconsCommon, className)}>
+        <GoogleDocsIcon className={cn("size-full", iconClassName)} {...rest} />
       </div>
     ),
     "ai.slackbot": createIconRenderer(SlackIcon),
@@ -672,9 +696,24 @@ export const providerIcons: Record<
       <GoogleIcon {...rest} />
     </div>
   ),
+  google_docs: ({ className, ...rest }) => (
+    <div className={className}>
+      <GoogleDocsIcon {...rest} />
+    </div>
+  ),
+  google_sheets: ({ className, ...rest }) => (
+    <div className={className}>
+      <GoogleSheetsIcon {...rest} />
+    </div>
+  ),
   github: ({ className, ...rest }) => (
     <div className={className}>
       <GitHubIcon {...rest} />
+    </div>
+  ),
+  servicenow: ({ className, ...rest }) => (
+    <div className={className}>
+      <ServiceNowIcon {...rest} />
     </div>
   ),
   slack: ({ className, iconClassName, flairsize: _ignored, ...rest }) => (
@@ -691,6 +730,7 @@ export const providerIcons: Record<
   notion_mcp: (props) => <NotionIcon {...props} />,
   linear_mcp: (props) => <LinearIcon {...props} />,
   runreveal_mcp: (props) => <RunRevealIcon {...props} />,
+  secureannex_mcp: (props) => <SecureAnnexIcon {...props} />,
   github_mcp: ({ className, ...rest }) => (
     <div className={className}>
       <GitHubIcon {...rest} />
@@ -787,6 +827,24 @@ export function SlackIcon({ className, ...rest }: IconProps) {
         <path
           d="m0 1553.2c-.1 135.3 109.5 245.1 244.8 245.2 135.3-.1 244.9-109.9 244.8-245.2v-245.2h-244.8c-135.3.1-244.9 109.9-244.8 245.2zm652.7 0v654c-.2 135.3 109.4 245.1 244.7 245.3 135.3-.1 244.9-109.9 244.8-245.2v-653.9c.2-135.3-109.4-245.1-244.7-245.3-135.4 0-244.9 109.8-244.8 245.1 0 0 0 .1 0 0"
           fill="#e01e5a"
+        />
+      </g>
+    </svg>
+  )
+}
+
+export function ServiceNowIcon({ className, ...rest }: IconProps) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="94 4.5 17 17"
+      className={className}
+      {...rest}
+    >
+      <g clipRule="evenodd" fillRule="evenodd">
+        <path
+          d="m102.8 5.762c-4.2 0-7.5 3.3-7.5 7.5 0 2.2 0.9 4.2 2.3 5.6 0.5 0.5 1.4 0.5 2 0.1 0.8-0.7 2-1.1 3.2-1.1 1.3 0 2.3 0.4 3.2 1.1 0.6 0.5 1.4 0.4 2-0.2 1.4-1.4 2.3-3.3 2.3-5.5-0.1-4.1-3.4-7.5-7.5-7.5m-0.1 11.4c-2.3 0-3.8-1.7-3.8-3.8s1.5-3.8 3.8-3.8 3.8 1.7 3.8 3.8-1.5 3.8-3.8 3.8"
+          fill="#81b5a1"
         />
       </g>
     </svg>
@@ -939,6 +997,116 @@ export function OllamaIcon({ className, ...rest }: IconProps) {
       <path
         d="M478.153 364.982C469.755 367.25 462.276 373.502 458.291 381.717L455.717 386.989L455.778 394.345C455.778 401.211 455.901 402.069 457.862 406.911C460.56 413.777 463.257 418.007 468.222 422.85C476.743 431.309 486.367 433.516 499.241 430.145C506.658 428.183 514.075 421.93 517.631 414.635C520.696 408.444 521.431 403.969 520.451 396.919C518.183 380.797 508.742 369.089 494.704 364.982C490.597 363.756 482.628 363.756 478.153 364.982Z"
         fill="black"
+      />
+    </svg>
+  )
+}
+
+export function GoogleSheetsIcon({ className, ...rest }: IconProps) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 47.333 65.083"
+      width="100%"
+      height="100%"
+      className={className}
+      {...rest}
+    >
+      <defs>
+        <linearGradient
+          id="sheets-gradient"
+          x1="50.0053945%"
+          y1="8.58610612%"
+          x2="50.0053945%"
+          y2="100.013939%"
+        >
+          <stop stopColor="#263238" stopOpacity="0.2" offset="0%" />
+          <stop stopColor="#263238" stopOpacity="0.02" offset="100%" />
+        </linearGradient>
+        <radialGradient
+          id="sheets-radial"
+          cx="3.16804688%"
+          cy="2.71744318%"
+          fx="3.16804688%"
+          fy="2.71744318%"
+          r="161.248516%"
+          gradientTransform="translate(0.031680,0.027174),scale(1.000000,0.727273),translate(-0.031680,-0.027174)"
+        >
+          <stop stopColor="#FFFFFF" stopOpacity="0.1" offset="0%" />
+          <stop stopColor="#FFFFFF" stopOpacity="0" offset="100%" />
+        </radialGradient>
+      </defs>
+      <path
+        d="M29.583 0L4.438 0C1.997 0 0 1.997 0 4.438v56.208c0 2.441 1.997 4.438 4.438 4.438h38.458c2.441 0 4.438-1.997 4.438-4.438V17.75L29.583 0z"
+        fill="#0F9D58"
+      />
+      <path
+        d="M11.833 31.802v21.448h23.667V31.802H11.833zm10.354 18.49h-7.396v-3.698h7.396v3.698zm0-5.917h-7.396v-3.698h7.396v3.698zm0-5.917h-7.396v-3.698h7.396v3.698zm10.354 18.49h-7.396v-3.698h7.396v3.698zm0-5.917h-7.396v-3.698h7.396v3.698zm0-5.917h-7.396v-3.698h7.396v3.698z"
+        fill="#F1F1F1"
+      />
+      <polygon
+        points="30.881 16.452 47.333 32.9 47.333 17.75"
+        fill="url(#sheets-gradient)"
+      />
+      <path d="M29.583 0L36.979 10.354 47.333 17.75 29.583 0z" fill="#87CEAC" />
+      <path
+        d="M29.583 0L4.438 0C1.997 0 0 1.997 0 4.438v56.208c0 2.441 1.997 4.438 4.438 4.438h38.458c2.441 0 4.438-1.997 4.438-4.438V17.75L29.583 0z"
+        fill="url(#sheets-radial)"
+      />
+    </svg>
+  )
+}
+
+export function GoogleDocsIcon({ className, ...rest }: IconProps) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 47 65"
+      width="100%"
+      height="100%"
+      className={className}
+      {...rest}
+    >
+      <defs>
+        <linearGradient
+          id="docs-gradient"
+          x1="50.0053945%"
+          y1="8.58610612%"
+          x2="50.0053945%"
+          y2="100.013939%"
+        >
+          <stop stopColor="#1A237E" stopOpacity="0.2" offset="0%" />
+          <stop stopColor="#1A237E" stopOpacity="0.02" offset="100%" />
+        </linearGradient>
+        <radialGradient
+          id="docs-radial"
+          cx="3.16804688%"
+          cy="2.71744318%"
+          fx="3.16804688%"
+          fy="2.71744318%"
+          r="161.248516%"
+          gradientTransform="translate(0.031680,0.027174),scale(1.000000,0.723077),translate(-0.031680,-0.027174)"
+        >
+          <stop stopColor="#FFFFFF" stopOpacity="0.1" offset="0%" />
+          <stop stopColor="#FFFFFF" stopOpacity="0" offset="100%" />
+        </radialGradient>
+      </defs>
+      <path
+        d="M29.375 0L4.406 0C1.983 0 0 1.994 0 4.432v56.136c0 2.438 1.983 4.432 4.406 4.432h38.188c2.423 0 4.406-1.994 4.406-4.432V17.727L29.375 0z"
+        fill="#4285F4"
+      />
+      <polygon
+        points="30.664 16.431 47 32.858 47 17.727"
+        fill="url(#docs-gradient)"
+      />
+      <path
+        d="M11.75 47.273h23.5v-2.955H11.75v2.955zm0 5.909h17.625v-2.955H11.75v2.955zm0-20.682v2.955h23.5V32.5H11.75zm0 8.864h23.5v-2.955H11.75v2.955z"
+        fill="#F1F1F1"
+      />
+      <path d="M29.375 0L36.719 10.341 47 17.727 29.375 0z" fill="#A1C2FA" />
+      <path
+        d="M29.375 0L4.406 0C1.983 0 0 1.994 0 4.432v56.136c0 2.438 1.983 4.432 4.406 4.432h38.188c2.423 0 4.406-1.994 4.406-4.432V17.727L29.375 0z"
+        fill="url(#docs-radial)"
       />
     </svg>
   )
@@ -1381,6 +1549,25 @@ export function RunRevealIcon({ className, ...rest }: IconProps) {
       <path
         d="M54.9686 64.6772V0.677274H79.8853V39.6204C79.8853 53.4505 68.7191 64.6772 54.9686 64.6772Z"
         fill="#A13DF7"
+      />
+    </svg>
+  )
+}
+
+export function SecureAnnexIcon({ className, ...rest }: IconProps) {
+  return (
+    <svg
+      width="100%"
+      height="100%"
+      viewBox="0 0 128 128"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      className={cn(basicIconsCommon, className)}
+      {...rest}
+    >
+      <path
+        d="M39.0952 47.5685C42.3415 53.1474 50.0988 52.8835 54.41 51.0064C57.6636 48.7812 61.8374 47.7023 66.0031 48.3406C73.7329 49.5253 78.5032 56.1663 76.6579 63.1735C74.8122 70.181 67.0491 74.9014 59.319 73.7168C55.7896 73.1758 52.8782 71.4969 50.931 69.1654C45.2426 65.3145 37.7613 65.7082 32.068 67.1721L16 112H38.5607L45.9916 90.094H82.0084L89.3724 112H112L77.523 16H50.41L39.0952 47.5685Z"
+        fill="#3C6E71"
       />
     </svg>
   )

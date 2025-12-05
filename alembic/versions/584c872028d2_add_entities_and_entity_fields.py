@@ -9,7 +9,6 @@ Create Date: 2025-08-26 16:05:51.322677
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-import sqlmodel.sql.sqltypes
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
@@ -50,16 +49,21 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("surrogate_id", sa.Integer(), nullable=False),
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("owner_id", sa.UUID(), nullable=False),
-        sa.Column("key", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-        sa.Column("display_name", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-        sa.Column("description", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
-        sa.Column("icon", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("key", sa.String(), nullable=False),
+        sa.Column("display_name", sa.String(), nullable=False),
+        sa.Column("description", sa.String(), nullable=True),
+        sa.Column("icon", sa.String(), nullable=True),
         sa.Column("is_active", sa.Boolean(), nullable=False),
-        sa.ForeignKeyConstraint(["owner_id"], ["workspace.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("surrogate_id"),
-        sa.UniqueConstraint("id"),
+        sa.ForeignKeyConstraint(
+            ["owner_id"],
+            ["workspace.id"],
+            ondelete="CASCADE",
+            name="entity_owner_id_fkey",
+        ),
+        sa.PrimaryKeyConstraint("surrogate_id", name="entity_pkey"),
+        sa.UniqueConstraint("id", name="entity_id_key"),
         sa.UniqueConstraint("owner_id", "key", name="uq_entity_owner_key"),
     )
     op.create_table(
@@ -78,9 +82,9 @@ def upgrade() -> None:
         ),
         sa.Column("surrogate_id", sa.Integer(), nullable=False),
         sa.Column("owner_id", sa.UUID(), nullable=False),
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("entity_id", sa.UUID(), nullable=False),
-        sa.Column("key", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("key", sa.String(), nullable=False),
         sa.Column(
             "type",
             postgresql.ENUM(
@@ -98,17 +102,27 @@ def upgrade() -> None:
             ),
             nullable=False,
         ),
-        sa.Column("display_name", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-        sa.Column("description", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("display_name", sa.String(), nullable=False),
+        sa.Column("description", sa.String(), nullable=True),
         sa.Column("is_active", sa.Boolean(), nullable=False),
         sa.Column(
             "default_value", postgresql.JSONB(astext_type=sa.Text()), nullable=True
         ),
-        sa.ForeignKeyConstraint(["entity_id"], ["entity.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["owner_id"], ["workspace.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("surrogate_id"),
+        sa.ForeignKeyConstraint(
+            ["entity_id"],
+            ["entity.id"],
+            ondelete="CASCADE",
+            name="entity_field_entity_id_fkey",
+        ),
+        sa.ForeignKeyConstraint(
+            ["owner_id"],
+            ["workspace.id"],
+            ondelete="CASCADE",
+            name="entity_field_owner_id_fkey",
+        ),
+        sa.PrimaryKeyConstraint("surrogate_id", name="entity_field_pkey"),
         sa.UniqueConstraint("entity_id", "key", name="uq_entity_field_key"),
-        sa.UniqueConstraint("id"),
+        sa.UniqueConstraint("id", name="entity_field_id_key"),
     )
     op.create_table(
         "entity_field_option",
@@ -124,13 +138,18 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("field_id", sa.UUID(), nullable=False),
-        sa.Column("key", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-        sa.Column("label", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-        sa.Column("description", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
-        sa.ForeignKeyConstraint(["field_id"], ["entity_field.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
+        sa.Column("key", sa.String(), nullable=False),
+        sa.Column("label", sa.String(), nullable=False),
+        sa.Column("description", sa.String(), nullable=True),
+        sa.ForeignKeyConstraint(
+            ["field_id"],
+            ["entity_field.id"],
+            ondelete="CASCADE",
+            name="entity_field_option_field_id_fkey",
+        ),
+        sa.PrimaryKeyConstraint("id", name="entity_field_option_pkey"),
         sa.UniqueConstraint("field_id", "key", name="uq_field_option_key"),
     )
     # ### end Alembic commands ###

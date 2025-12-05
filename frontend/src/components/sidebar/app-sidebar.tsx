@@ -5,8 +5,10 @@ import {
   BracketsIcon,
   KeyRoundIcon,
   type LucideIcon,
+  MessageSquareIcon,
   SquareStackIcon,
   Table2Icon,
+  UserCheckIcon,
   UsersIcon,
   WorkflowIcon,
   ZapIcon,
@@ -71,6 +73,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
 
   const navMain: NavItem[] = [
     {
+      title: "Copilot",
+      url: `${basePath}/copilot`,
+      icon: MessageSquareIcon,
+      isActive: pathname?.startsWith(`${basePath}/copilot`),
+    },
+    {
       title: "Workflows",
       url: `${basePath}/workflows`,
       icon: WorkflowIcon,
@@ -87,6 +95,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       url: `${basePath}/agents`,
       icon: BotIcon,
       isActive: pathname?.startsWith(`${basePath}/agents`),
+    },
+    {
+      title: "Approvals",
+      url: `${basePath}/approvals`,
+      icon: UserCheckIcon,
+      isActive: pathname?.startsWith(`${basePath}/approvals`),
     },
   ]
 

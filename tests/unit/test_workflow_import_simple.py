@@ -2,7 +2,7 @@
 
 import pytest
 import yaml
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tracecat.auth.types import Role
 from tracecat.dsl.common import DSLConfig, DSLEntrypoint, DSLInput
@@ -82,7 +82,7 @@ class TestWorkflowImportServiceSimple:
         assert action.type == "core.transform.transform"
         assert action.description == "Simple transform action"
         assert action.workflow_id == workflow_id
-        assert action.owner_id == import_service.workspace_id
+        assert action.workspace_id == import_service.workspace_id
 
         # Verify inputs are YAML serialized
         inputs = yaml.safe_load(action.inputs)

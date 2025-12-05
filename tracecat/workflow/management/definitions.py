@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlmodel import col, select
+from sqlalchemy import select
 from temporalio import activity
 
 from tracecat.db.models import WorkflowDefinition
@@ -19,28 +19,28 @@ class WorkflowDefinitionsService(BaseService):
         self, workflow_id: WorkflowID, *, version: int | None = None
     ) -> WorkflowDefinition | None:
         statement = select(WorkflowDefinition).where(
-            WorkflowDefinition.owner_id == self.role.workspace_id,
+            WorkflowDefinition.workspace_id == self.role.workspace_id,
             WorkflowDefinition.workflow_id == workflow_id,
         )
         if version:
             statement = statement.where(WorkflowDefinition.version == version)
         else:
             # Get the latest version
-            statement = statement.order_by(col(WorkflowDefinition.version).desc())
+            statement = statement.order_by(WorkflowDefinition.version.desc())
 
-        result = await self.session.exec(statement)
-        return result.first()
+        result = await self.session.execute(statement)
+        return result.scalars().first()
 
     async def list_workflow_defitinions(
         self, workflow_id: WorkflowID | None = None
     ) -> list[WorkflowDefinition]:
         statement = select(WorkflowDefinition).where(
-            WorkflowDefinition.owner_id == self.role.workspace_id,
+            WorkflowDefinition.workspace_id == self.role.workspace_id,
         )
         if workflow_id:
             statement = statement.where(WorkflowDefinition.workflow_id == workflow_id)
-        result = await self.session.exec(statement)
-        return list(result.all())
+        result = await self.session.execute(statement)
+        return list(result.scalars().all())
 
     async def create_workflow_definition(
         self,
@@ -54,17 +54,17 @@ class WorkflowDefinitionsService(BaseService):
         statement = (
             select(WorkflowDefinition)
             .where(
-                WorkflowDefinition.owner_id == self.role.workspace_id,
+                WorkflowDefinition.workspace_id == self.role.workspace_id,
                 WorkflowDefinition.workflow_id == workflow_id,
             )
-            .order_by(col(WorkflowDefinition.version).desc())
+            .order_by(WorkflowDefinition.version.desc())
         )
-        result = await self.session.exec(statement)
-        latest_defn = result.first()
+        result = await self.session.execute(statement)
+        latest_defn = result.scalars().first()
 
         version = latest_defn.version + 1 if latest_defn else 1
         defn = WorkflowDefinition(
-            owner_id=self.role.workspace_id,
+            workspace_id=self.role.workspace_id,
             workflow_id=workflow_id,
             content=dsl.model_dump(exclude_unset=True),
             version=version,

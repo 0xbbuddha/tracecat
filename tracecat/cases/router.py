@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
+from asyncpg import DuplicateColumnError
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy.exc import DBAPIError, NoResultFound, ProgrammingError
 from starlette.status import (
@@ -10,6 +11,7 @@ from starlette.status import (
     HTTP_204_NO_CONTENT,
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
+    HTTP_409_CONFLICT,
     HTTP_500_INTERNAL_SERVER_ERROR,
 )
 
@@ -25,11 +27,11 @@ from tracecat.cases.schemas import (
     CaseCommentRead,
     CaseCommentUpdate,
     CaseCreate,
-    CaseCustomFieldRead,
     CaseEventRead,
     CaseEventsWithUsers,
     CaseFieldCreate,
     CaseFieldRead,
+    CaseFieldReadMinimal,
     CaseFieldUpdate,
     CaseRead,
     CaseReadMinimal,
@@ -106,8 +108,18 @@ async def list_cases(
     tags: list[str] | None = Query(
         None, description="Filter by tag IDs or slugs (AND logic)"
     ),
+    order_by: Literal[
+        "created_at", "updated_at", "priority", "severity", "status", "tasks"
+    ]
+    | None = Query(
+        None,
+        description="Column name to order by (e.g. created_at, updated_at, priority, severity, status, tasks). Default: created_at",
+    ),
+    sort: Literal["asc", "desc"] | None = Query(
+        None, description="Direction to sort (asc or desc)"
+    ),
 ) -> CursorPaginatedResponse[CaseReadMinimal]:
-    """List cases with cursor-based pagination and filtering."""
+    """List cases with cursor-based pagination, filtering, and sorting."""
     service = CasesService(session, role)
 
     # Convert tag identifiers to IDs
@@ -154,7 +166,17 @@ async def list_cases(
             assignee_ids=parsed_assignee_ids or None,
             include_unassigned=include_unassigned,
             tag_ids=tag_ids if tag_ids else None,
+            order_by=order_by,
+            sort=sort,
         )
+    except ValueError as e:
+        logger.warning(f"Invalid request for list cases: {e}")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to list cases: {e}")
         raise HTTPException(
@@ -184,7 +206,10 @@ async def search_cases(
     ),
     limit: int | None = Query(None, description="Maximum number of cases to return"),
     order_by: Literal["created_at", "updated_at", "priority", "severity", "status"]
-    | None = Query(None, description="Field to order the cases by"),
+    | None = Query(
+        None,
+        description="Column name to order by (e.g. created_at, updated_at, priority, severity, status). Default: created_at",
+    ),
     sort: Literal["asc", "desc"] | None = Query(
         None, description="Direction to sort (asc or desc)"
     ),
@@ -256,7 +281,7 @@ async def search_cases(
                 id=case.id,
                 created_at=case.created_at,
                 updated_at=case.updated_at,
-                short_id=f"CASE-{case.case_number:04d}",
+                short_id=case.short_id,
                 summary=case.summary,
                 status=case.status,
                 priority=case.priority,
@@ -290,17 +315,19 @@ async def get_case(
         )
     fields = await service.fields.get_fields(case) or {}
     field_definitions = await service.fields.list_fields()
+    field_schema = await service.fields.get_field_schema()
     final_fields = []
     for defn in field_definitions:
-        f = CaseFieldRead.from_sa(defn)
+        f = CaseFieldReadMinimal.from_sa(defn, field_schema=field_schema)
         final_fields.append(
-            CaseCustomFieldRead(
+            CaseFieldRead(
                 id=f.id,
                 type=f.type,
                 description=f.description,
                 nullable=f.nullable,
                 default=f.default,
                 reserved=f.reserved,
+                options=f.options,
                 value=fields.get(f.id),
             )
         )
@@ -313,7 +340,7 @@ async def get_case(
     # Match up the fields with the case field definitions
     return CaseRead(
         id=case.id,
-        short_id=f"CASE-{case.case_number:04d}",
+        short_id=case.short_id,
         created_at=case.created_at,
         updated_at=case.updated_at,
         summary=case.summary,
@@ -514,11 +541,15 @@ async def list_fields(
     *,
     role: WorkspaceUser,
     session: AsyncDBSession,
-) -> list[CaseFieldRead]:
+) -> list[CaseFieldReadMinimal]:
     """List all case fields."""
     service = CaseFieldsService(session, role)
     columns = await service.list_fields()
-    return [CaseFieldRead.from_sa(column) for column in columns]
+    field_schema = await service.get_field_schema()
+    return [
+        CaseFieldReadMinimal.from_sa(column, field_schema=field_schema)
+        for column in columns
+    ]
 
 
 @case_fields_router.post("", status_code=HTTP_201_CREATED)
@@ -530,7 +561,18 @@ async def create_field(
 ) -> None:
     """Create a new case field."""
     service = CaseFieldsService(session, role)
-    await service.create_field(params)
+    try:
+        await service.create_field(params)
+    except ProgrammingError as e:
+        # Drill down to the root cause
+        while (cause := e.__cause__) is not None:
+            e = cause
+        if isinstance(e, DuplicateColumnError):
+            raise HTTPException(
+                status_code=HTTP_409_CONFLICT,
+                detail=f"A field with the name '{params.name}' already exists",
+            ) from e
+        raise
 
 
 @case_fields_router.patch("/{field_id}", status_code=HTTP_204_NO_CONTENT)
@@ -651,6 +693,7 @@ async def list_tasks(
             workflow_id=WorkflowUUID.new(task.workflow_id).short()
             if task.workflow_id
             else None,
+            default_trigger_values=task.default_trigger_values,
         )
         for task in tasks
     ]
@@ -683,6 +726,7 @@ async def create_task(
             workflow_id=WorkflowUUID.new(task.workflow_id).short()
             if task.workflow_id
             else None,
+            default_trigger_values=task.default_trigger_values,
         )
     except TracecatNotFoundError as e:
         raise HTTPException(
@@ -728,6 +772,7 @@ async def update_task(
             workflow_id=WorkflowUUID.new(task.workflow_id).short()
             if task.workflow_id
             else None,
+            default_trigger_values=task.default_trigger_values,
         )
     except TracecatNotFoundError as e:
         raise HTTPException(

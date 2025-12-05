@@ -3,16 +3,17 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from pydantic import UUID4
+from sqlalchemy import select
 from sqlalchemy.orm import load_only, noload
-from sqlmodel import select
 
 from tracecat import config
-from tracecat.auth.types import AccessLevel
+from tracecat.auth.types import AccessLevel, Role
 from tracecat.authz.controls import require_access_level
-from tracecat.authz.enums import OwnerType
+from tracecat.authz.enums import OwnerType, WorkspaceRole
+from tracecat.cases.service import CaseFieldsService
 from tracecat.db.models import Membership, Ownership, User, Workspace
 from tracecat.exceptions import TracecatException, TracecatManagementError
-from tracecat.identifiers import OwnerID, UserID, WorkspaceID
+from tracecat.identifiers import OrganizationID, UserID, WorkspaceID
 from tracecat.service import BaseService
 from tracecat.workspaces.schemas import WorkspaceSearch, WorkspaceUpdate
 
@@ -38,8 +39,8 @@ class WorkspaceService(BaseService):
             if limit <= 0:
                 raise TracecatException("List workspace limit must be greater than 0")
             statement = statement.limit(limit)
-        result = await self.session.exec(statement)
-        return result.all()
+        result = await self.session.execute(statement)
+        return result.scalars().all()
 
     async def list_workspaces(
         self, user_id: UserID, limit: int | None = None
@@ -59,47 +60,63 @@ class WorkspaceService(BaseService):
             if limit <= 0:
                 raise TracecatException("List workspace limit must be greater than 0")
             statement = statement.limit(limit)
-        result = await self.session.exec(statement)
-        return result.all()
+        result = await self.session.execute(statement)
+        return result.scalars().all()
 
     @require_access_level(AccessLevel.ADMIN)
     async def create_workspace(
         self,
         name: str,
         *,
-        owner_id: OwnerID = config.TRACECAT__DEFAULT_ORG_ID,
+        organization_id: OrganizationID = config.TRACECAT__DEFAULT_ORG_ID,
         override_id: UUID4 | None = None,
         users: list[User] | None = None,
     ) -> Workspace:
         """Create a new workspace."""
         kwargs = {
             "name": name,
-            "owner_id": owner_id,
-            "users": users or [],
+            "organization_id": organization_id,
+            # Workspace model defines the relationship as "members"
+            "members": users or [],
         }
         if override_id:
             kwargs["id"] = override_id
         workspace = Workspace(**kwargs)
         self.session.add(workspace)
+        await self.session.flush()
 
         # Create ownership record
         ownership = Ownership(
             resource_id=str(workspace.id),
             resource_type="workspace",
-            owner_id=owner_id,
+            owner_id=organization_id,
             owner_type=OwnerType.USER.value,
         )
         self.session.add(ownership)
 
+        # Initialize workspace-scoped case fields schema in the same transaction
+        bootstrap_role = Role(
+            type="service",
+            service_id="tracecat-service",
+            workspace_id=workspace.id,
+            workspace_role=WorkspaceRole.ADMIN,
+            access_level=AccessLevel.ADMIN,
+        )
+        case_fields_service = CaseFieldsService(
+            session=self.session, role=bootstrap_role
+        )
+        await case_fields_service.initialize_workspace_schema()
+
         await self.session.commit()
         await self.session.refresh(workspace)
+
         return workspace
 
     async def get_workspace(self, workspace_id: WorkspaceID) -> Workspace | None:
         """Retrieve a workspace by ID."""
         statement = select(Workspace).where(Workspace.id == workspace_id)
-        result = await self.session.exec(statement)
-        return result.one_or_none()
+        result = await self.session.execute(statement)
+        return result.scalar_one_or_none()
 
     @require_access_level(AccessLevel.ADMIN)
     async def update_workspace(
@@ -124,8 +141,19 @@ class WorkspaceService(BaseService):
                 "There must be at least one workspace in the organization."
             )
         statement = select(Workspace).where(Workspace.id == workspace_id)
-        result = await self.session.exec(statement)
-        workspace = result.one()
+        result = await self.session.execute(statement)
+        workspace = result.scalar_one()
+        bootstrap_role = Role(
+            type="service",
+            service_id="tracecat-service",
+            workspace_id=workspace.id,
+            workspace_role=WorkspaceRole.ADMIN,
+            access_level=AccessLevel.ADMIN,
+        )
+        case_fields_service = CaseFieldsService(
+            session=self.session, role=bootstrap_role
+        )
+        await case_fields_service.drop_workspace_schema()
         await self.session.delete(workspace)
         await self.session.commit()
 
@@ -140,5 +168,5 @@ class WorkspaceService(BaseService):
             )
         if params.name:
             statement = statement.where(Workspace.name == params.name)
-        result = await self.session.exec(statement)
-        return result.all()
+        result = await self.session.execute(statement)
+        return result.scalars().all()

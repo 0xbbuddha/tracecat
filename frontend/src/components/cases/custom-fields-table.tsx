@@ -3,7 +3,7 @@
 import { DotsHorizontalIcon } from "@radix-ui/react-icons"
 import { format } from "date-fns"
 import { useState } from "react"
-import type { CaseFieldRead } from "@/client"
+import type { CaseFieldReadMinimal } from "@/client"
 import {
   DataTable,
   DataTableColumnHeader,
@@ -21,6 +21,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -31,7 +32,7 @@ import {
 import type { SqlType } from "@/lib/data-type"
 
 interface CustomFieldsTableProps {
-  fields: CaseFieldRead[]
+  fields: CaseFieldReadMinimal[]
   onDeleteField: (fieldId: string) => Promise<void>
   isDeleting?: boolean
 }
@@ -41,7 +42,8 @@ export function CustomFieldsTable({
   onDeleteField,
   isDeleting,
 }: CustomFieldsTableProps) {
-  const [selectedField, setSelectedField] = useState<CaseFieldRead | null>(null)
+  const [selectedField, setSelectedField] =
+    useState<CaseFieldReadMinimal | null>(null)
 
   return (
     <AlertDialog
@@ -65,7 +67,7 @@ export function CustomFieldsTable({
             ),
             cell: ({ row }) => (
               <div className="text-xs text-foreground/80">
-                {row.getValue<CaseFieldRead["id"]>("id")}
+                {row.getValue<CaseFieldReadMinimal["id"]>("id")}
               </div>
             ),
             enableSorting: true,
@@ -82,7 +84,9 @@ export function CustomFieldsTable({
             ),
             cell: ({ row }) => (
               <SqlTypeBadge
-                type={row.getValue<CaseFieldRead["type"]>("type") as SqlType}
+                type={
+                  row.getValue<CaseFieldReadMinimal["type"]>("type") as SqlType
+                }
               />
             ),
             enableSorting: true,
@@ -99,8 +103,48 @@ export function CustomFieldsTable({
             ),
             cell: ({ row }) => {
               const defaultValue =
-                row.getValue<CaseFieldRead["default"]>("default")
+                row.getValue<CaseFieldReadMinimal["default"]>("default")
               const fieldType = row.original.type
+
+              // Handle SELECT/MULTI_SELECT as badges
+              if (fieldType === "SELECT" || fieldType === "MULTI_SELECT") {
+                let parsedValues: string[] = []
+                if (defaultValue) {
+                  if (fieldType === "MULTI_SELECT") {
+                    try {
+                      const parsed = JSON.parse(defaultValue)
+                      if (Array.isArray(parsed)) {
+                        parsedValues = parsed.filter(
+                          (item): item is string => typeof item === "string"
+                        )
+                      }
+                    } catch {
+                      parsedValues = [defaultValue]
+                    }
+                  } else {
+                    parsedValues = [defaultValue]
+                  }
+                }
+
+                if (parsedValues.length > 0) {
+                  return (
+                    <div className="flex flex-wrap gap-1">
+                      {parsedValues.map((item, idx) => (
+                        <Badge
+                          key={`default-${item}-${idx}`}
+                          variant="secondary"
+                          className="text-[11px]"
+                        >
+                          {item}
+                        </Badge>
+                      ))}
+                    </div>
+                  )
+                }
+                return <div className="text-xs">-</div>
+              }
+
+              // Handle TIMESTAMP/TIMESTAMPTZ with date formatting
               const parsedDate =
                 typeof defaultValue === "string" &&
                 defaultValue &&
@@ -197,7 +241,7 @@ export function CustomFieldsTable({
   )
 }
 
-const defaultToolbarProps: DataTableToolbarProps<CaseFieldRead> = {
+const defaultToolbarProps: DataTableToolbarProps<CaseFieldReadMinimal> = {
   filterProps: {
     placeholder: "Filter fields by ID...",
     column: "id",

@@ -11,7 +11,6 @@ import {
   WorkflowTriggerForm,
 } from "@/components/cases/workflow-trigger-form"
 import { JsonViewWithControls } from "@/components/json-viewer"
-import { SystemInfoAlert } from "@/components/system"
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -30,8 +29,6 @@ import { useCreateManualWorkflowExecution } from "@/lib/hooks"
 import type { TracecatJsonSchema } from "@/lib/schema"
 import { useWorkspaceId } from "@/providers/workspace-id"
 
-const SHOW_BETA_ALERT = true
-
 type WorkflowWithSchema = WorkflowRead & {
   expects_schema?: TracecatJsonSchema | null
 }
@@ -40,6 +37,7 @@ interface WorkflowTriggerDialogProps {
   caseData: CaseRead
   workflowId: string | null
   workflowTitle?: string | null
+  defaultTriggerValues?: Record<string, unknown> | null
   open: boolean
   onOpenChange: (open: boolean) => void
 }
@@ -48,6 +46,7 @@ export function WorkflowTriggerDialog({
   caseData,
   workflowId,
   workflowTitle,
+  defaultTriggerValues,
   open,
   onOpenChange,
 }: WorkflowTriggerDialogProps) {
@@ -175,13 +174,13 @@ export function WorkflowTriggerDialog({
               : `Are you sure you want to trigger "${selectedWorkflowName}" with the following inputs?`}
           </AlertDialogDescription>
         </AlertDialogHeader>
-        {SHOW_BETA_ALERT && <SystemInfoAlert kind="beta-ee-contact-us" />}
         {triggerSchema ? (
           <WorkflowTriggerForm
             schema={triggerSchema}
             caseId={caseData.id}
             caseFields={caseFieldsRecord}
             groupCaseFields={effectiveGroupCaseFields}
+            defaultTriggerValues={defaultTriggerValues}
             onSubmit={handleSchemaSubmit}
             isSubmitting={createExecutionIsPending}
           />

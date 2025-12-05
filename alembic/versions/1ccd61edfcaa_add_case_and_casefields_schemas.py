@@ -9,7 +9,6 @@ Create Date: 2025-04-07 14:37:51.063412
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-import sqlmodel.sql.sqltypes
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
@@ -62,16 +61,16 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("surrogate_id", sa.Integer(), nullable=False),
-        sa.Column("owner_id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
+        sa.Column("owner_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column(
             "case_number",
             sa.Integer(),
             sa.Identity(always=False, start=1, increment=1),
             nullable=False,
         ),
-        sa.Column("summary", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-        sa.Column("description", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("summary", sa.String(), nullable=False),
+        sa.Column("description", sa.String(), nullable=False),
         sa.Column(
             "priority",
             postgresql.ENUM(
@@ -117,7 +116,7 @@ def upgrade() -> None:
             ),
             nullable=False,
         ),
-        sa.PrimaryKeyConstraint("surrogate_id"),
+        sa.PrimaryKeyConstraint("surrogate_id", name="cases_pkey"),
     )
     op.create_index(op.f("ix_cases_case_number"), "cases", ["case_number"], unique=True)
     op.create_index(op.f("ix_cases_id"), "cases", ["id"], unique=True)
@@ -135,11 +134,16 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("case_id", sa.UUID(), nullable=False),
-        sa.ForeignKeyConstraint(["case_id"], ["cases.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("case_id"),
+        sa.ForeignKeyConstraint(
+            ["case_id"],
+            ["cases.id"],
+            ondelete="CASCADE",
+            name="case_fields_case_id_fkey",
+        ),
+        sa.PrimaryKeyConstraint("id", name="case_fields_pkey"),
+        sa.UniqueConstraint("case_id", name="case_fields_case_id_key"),
     )
     op.create_index(op.f("ix_case_fields_id"), "case_fields", ["id"], unique=True)
     # ### end Alembic commands ###

@@ -16,8 +16,12 @@ from tracecat.agent.observability import init_langfuse
 from tracecat.agent.parsers import try_parse_json
 from tracecat.agent.schemas import AgentOutput, RunAgentArgs
 from tracecat.agent.stream.common import PersistableStreamingAgentDeps
-from tracecat.agent.types import AgentConfig, OutputType
-from tracecat.config import TRACECAT__AGENT_MAX_REQUESTS, TRACECAT__AGENT_MAX_TOOL_CALLS
+from tracecat.agent.types import AgentConfig, MCPServerConfig, OutputType
+from tracecat.config import (
+    TRACECAT__AGENT_MAX_REQUESTS,
+    TRACECAT__AGENT_MAX_RETRIES,
+    TRACECAT__AGENT_MAX_TOOL_CALLS,
+)
 from tracecat.contexts import ctx_role, ctx_session_id
 from tracecat.exceptions import TracecatAuthorizationError
 from tracecat.logger import logger
@@ -72,12 +76,13 @@ async def run_agent(
     tool_approvals: dict[str, bool] | None = None,
     mcp_server_url: str | None = None,
     mcp_server_headers: dict[str, str] | None = None,
+    mcp_servers: list[MCPServerConfig] | None = None,
     instructions: str | None = None,
     output_type: OutputType | None = None,
     model_settings: dict[str, Any] | None = None,
-    max_tool_calls: int = 5,
-    max_requests: int = 20,
-    retries: int = 3,
+    max_tool_calls: int = TRACECAT__AGENT_MAX_TOOL_CALLS,
+    max_requests: int = TRACECAT__AGENT_MAX_REQUESTS,
+    retries: int = TRACECAT__AGENT_MAX_RETRIES,
     base_url: str | None = None,
     deferred_tool_results: DeferredToolResults | None = None,
 ) -> AgentOutput:
@@ -98,8 +103,9 @@ async def run_agent(
         tool_approvals: Optional per-tool approval requirements keyed by action name.
         instructions: Optional system instructions/context for the agent.
                      If provided, will be enhanced with tool guidance and error handling.
-        mcp_server_url: Optional URL of the MCP server to use.
-        mcp_server_headers: Optional headers for the MCP server.
+        mcp_server_url: (Legacy) Optional URL of the MCP server to use.
+        mcp_server_headers: (Legacy) Optional headers for the MCP server.
+        mcp_servers: Optional list of MCP server configurations (preferred over legacy params).
         output_type: Optional specification for the agent's output format.
                     Can be a string type name or a structured dictionary schema.
                     Supported types: bool, float, int, str, list[bool], list[float], list[int], list[str]
@@ -161,6 +167,16 @@ async def run_agent(
     )
     executor = AioStreamingAgentExecutor(deps=deps, role=role)
     try:
+        # Merge legacy mcp_server_url/headers with new mcp_servers format
+        if mcp_server_url:
+            if mcp_servers is None:
+                mcp_servers = []
+            legacy_mcp_server = MCPServerConfig(
+                url=mcp_server_url,
+                headers=mcp_server_headers or {},
+            )
+            mcp_servers.append(legacy_mcp_server)
+
         args = RunAgentArgs(
             user_prompt=user_prompt,
             session_id=session_id,
@@ -173,8 +189,7 @@ async def run_agent(
                 model_settings=model_settings,
                 retries=retries,
                 deps_type=type(deps),
-                mcp_server_url=mcp_server_url,
-                mcp_server_headers=mcp_server_headers,
+                mcp_servers=mcp_servers or None,
                 actions=actions,
                 namespaces=namespaces,
                 tool_approvals=tool_approvals,
@@ -186,11 +201,7 @@ async def run_agent(
         handle = await executor.start(args)
         result = await handle.result()
         if result is None:
-            raise RuntimeError(
-                "Action: Streaming agent run did not complete successfully. The "
-                "selected model may not support streaming responses. Try switching "
-                "to a model with streaming support or disable streaming."
-            )
+            raise RuntimeError("Agent run did not complete successfully.")
         end_time = default_timer()
         return AgentOutput(
             output=try_parse_json(result.output),

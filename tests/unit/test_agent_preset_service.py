@@ -3,7 +3,7 @@
 import uuid
 
 import pytest
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tracecat.agent.preset.schemas import AgentPresetCreate, AgentPresetUpdate
 from tracecat.agent.preset.service import AgentPresetService
@@ -29,7 +29,7 @@ async def registry_repository(
 ) -> RegistryRepository:
     """Create a test registry repository."""
     repo = RegistryRepository(
-        owner_id=svc_workspace.id,
+        organization_id=svc_workspace.organization_id,
         origin="test",
     )
     session.add(repo)
@@ -45,7 +45,7 @@ async def registry_actions(
     """Create test registry actions."""
     actions = [
         RegistryAction(
-            owner_id=registry_repository.owner_id,
+            organization_id=registry_repository.organization_id,
             repository_id=registry_repository.id,
             name="test_action",
             namespace="tools.test",
@@ -55,7 +55,7 @@ async def registry_actions(
             interface={},
         ),
         RegistryAction(
-            owner_id=registry_repository.owner_id,
+            organization_id=registry_repository.organization_id,
             repository_id=registry_repository.id,
             name="another_action",
             namespace="tools.test",
@@ -65,7 +65,7 @@ async def registry_actions(
             interface={},
         ),
         RegistryAction(
-            owner_id=registry_repository.owner_id,
+            organization_id=registry_repository.organization_id,
             repository_id=registry_repository.id,
             name="http_request",
             namespace="core",
@@ -98,9 +98,7 @@ def agent_preset_create_params() -> AgentPresetCreate:
         actions=None,
         namespaces=None,
         tool_approvals=None,
-        mcp_server_url=None,
-        mcp_server_headers=None,
-        model_settings=None,
+        mcp_integrations=None,
         retries=3,
     )
 
@@ -124,7 +122,7 @@ class TestAgentPresetService:
         assert (
             created_preset.model_provider == agent_preset_create_params.model_provider
         )
-        assert created_preset.owner_id == agent_preset_service.workspace_id
+        assert created_preset.workspace_id == agent_preset_service.workspace_id
 
         # Retrieve by ID
         retrieved_preset = await agent_preset_service.get_preset(created_preset.id)
@@ -456,32 +454,22 @@ class TestAgentPresetService:
         agent_preset_create_params.actions = ["tools.test.test_action"]
         agent_preset_create_params.namespaces = ["tools.test"]
         agent_preset_create_params.tool_approvals = {"tools.test.test_action": True}
-        agent_preset_create_params.model_settings = {"temperature": 0.7}
-        agent_preset_create_params.mcp_server_url = "http://mcp.example.com"
-        agent_preset_create_params.mcp_server_headers = {
-            "Authorization": "Bearer token"
-        }
 
         created_preset = await agent_preset_service.create_preset(
             agent_preset_create_params
         )
 
         # Get agent config by ID
-        config = await agent_preset_service.get_agent_config(created_preset.id)
+        agent_config = await agent_preset_service.get_agent_config(created_preset.id)
 
-        assert isinstance(config, AgentConfig)
-        assert config.model_name == agent_preset_create_params.model_name
-        assert config.model_provider == agent_preset_create_params.model_provider
-        assert config.instructions == agent_preset_create_params.instructions
-        assert config.actions == agent_preset_create_params.actions
-        assert config.namespaces == agent_preset_create_params.namespaces
-        assert config.tool_approvals == agent_preset_create_params.tool_approvals
-        assert config.model_settings == agent_preset_create_params.model_settings
-        assert config.mcp_server_url == agent_preset_create_params.mcp_server_url
-        assert (
-            config.mcp_server_headers == agent_preset_create_params.mcp_server_headers
-        )
-        assert config.retries == agent_preset_create_params.retries
+        assert isinstance(agent_config, AgentConfig)
+        assert agent_config.model_name == agent_preset_create_params.model_name
+        assert agent_config.model_provider == agent_preset_create_params.model_provider
+        assert agent_config.instructions == agent_preset_create_params.instructions
+        assert agent_config.actions == agent_preset_create_params.actions
+        assert agent_config.namespaces == agent_preset_create_params.namespaces
+        assert agent_config.tool_approvals == agent_preset_create_params.tool_approvals
+        assert agent_config.retries == agent_preset_create_params.retries
 
     async def test_get_agent_config_by_slug(
         self,
@@ -620,18 +608,59 @@ class TestAgentPresetService:
         preset = await agent_preset_service.create_preset(agent_preset_create_params)
 
         # Test conversion
-        config = agent_preset_service._preset_to_agent_config(preset)
+        agent_config = await agent_preset_service._preset_to_agent_config(preset)
 
-        assert isinstance(config, AgentConfig)
-        assert config.model_name == preset.model_name
-        assert config.model_provider == preset.model_provider
-        assert config.base_url == preset.base_url
-        assert config.instructions == preset.instructions
-        assert config.output_type == preset.output_type
-        assert config.actions == preset.actions
-        assert config.namespaces == preset.namespaces
-        assert config.tool_approvals == preset.tool_approvals
-        assert config.mcp_server_url == preset.mcp_server_url
-        assert config.mcp_server_headers == preset.mcp_server_headers
-        assert config.model_settings == preset.model_settings
-        assert config.retries == preset.retries
+        assert isinstance(agent_config, AgentConfig)
+        assert agent_config.model_name == preset.model_name
+        assert agent_config.model_provider == preset.model_provider
+        assert agent_config.base_url == preset.base_url
+        assert agent_config.instructions == preset.instructions
+        assert agent_config.output_type == preset.output_type
+        assert agent_config.actions == preset.actions
+        assert agent_config.namespaces == preset.namespaces
+        assert agent_config.tool_approvals == preset.tool_approvals
+        assert agent_config.retries == preset.retries
+
+    async def test_create_preset_with_tool_approvals(
+        self,
+        agent_preset_service: AgentPresetService,
+        agent_preset_create_params: AgentPresetCreate,
+        registry_actions: list[RegistryAction],
+    ) -> None:
+        """Test that creating a preset with tool_approvals is allowed."""
+        agent_preset_create_params.actions = ["tools.test.test_action"]
+        agent_preset_create_params.tool_approvals = {"tools.test.test_action": True}
+
+        preset = await agent_preset_service.create_preset(agent_preset_create_params)
+        assert preset.tool_approvals == {"tools.test.test_action": True}
+
+    async def test_update_preset_tool_approvals(
+        self,
+        agent_preset_service: AgentPresetService,
+        agent_preset_create_params: AgentPresetCreate,
+        registry_actions: list[RegistryAction],
+    ) -> None:
+        """Test that updating tool_approvals on a preset is allowed."""
+        agent_preset_create_params.actions = ["tools.test.test_action"]
+        preset = await agent_preset_service.create_preset(agent_preset_create_params)
+
+        update_params = AgentPresetUpdate(
+            tool_approvals={"tools.test.test_action": True}
+        )
+        updated_preset = await agent_preset_service.update_preset(preset, update_params)
+        assert updated_preset.tool_approvals == {"tools.test.test_action": True}
+
+    async def test_update_preset_clear_tool_approvals(
+        self,
+        agent_preset_service: AgentPresetService,
+        agent_preset_create_params: AgentPresetCreate,
+        registry_actions: list[RegistryAction],
+    ) -> None:
+        """Test that clearing tool_approvals on a preset is allowed."""
+        agent_preset_create_params.actions = ["tools.test.test_action"]
+        agent_preset_create_params.tool_approvals = {"tools.test.test_action": True}
+        preset = await agent_preset_service.create_preset(agent_preset_create_params)
+
+        update_params = AgentPresetUpdate(tool_approvals=None)
+        updated_preset = await agent_preset_service.update_preset(preset, update_params)
+        assert updated_preset.tool_approvals is None

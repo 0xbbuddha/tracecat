@@ -23,7 +23,7 @@ from pydantic import (
     create_model,
 )
 from pydantic_core import to_jsonable_python
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 from tracecat_registry import RegistrySecretType
 from typing_extensions import Doc
 
@@ -39,7 +39,6 @@ from tracecat.logger import logger
 from tracecat.parse import safe_url
 from tracecat.registry.actions.schemas import BoundRegistryAction, TemplateAction
 from tracecat.registry.constants import (
-    CUSTOM_REPOSITORY_ORIGIN,
     DEFAULT_LOCAL_REGISTRY_ORIGIN,
     DEFAULT_REGISTRY_ORIGIN,
 )
@@ -337,8 +336,6 @@ class Repository:
             self._load_base_template_actions()
             return None
 
-        elif self._origin == CUSTOM_REPOSITORY_ORIGIN:
-            raise RegistryError("This repository cannot be synced.")
         # Handle local git repositories
         elif self._origin == DEFAULT_LOCAL_REGISTRY_ORIGIN:
             # The local repo doesn't have to be a git repo, but it should be a directory
@@ -859,11 +856,18 @@ def generate_model_from_function(
         field_info = Field(default=default, **field_info_kwargs)
         fields[name] = (field_annotation, field_info)
     # Dynamically create and return the Pydantic model class
+    # Pass the function's module so Pydantic can resolve type aliases (e.g., OutputTypeLiteral)
+    func_module = sys.modules.get(func.__module__)
+    func_globals = getattr(func_module, "__dict__", {}) if func_module else {}
     input_model = create_model(
         _udf_slug_camelcase(func, udf_kwargs.namespace),
         __config__=ConfigDict(extra="forbid"),
+        __module__=func.__module__,
+        __validators__={},
         **fields,
     )
+    # Rebuild the model with the function's global namespace to resolve forward references
+    input_model.model_rebuild(_types_namespace=func_globals)
     # Capture the return type of the function
     rtype = sig.return_annotation if sig.return_annotation is not sig.empty else Any
     rtype_adapter = TypeAdapter(rtype)

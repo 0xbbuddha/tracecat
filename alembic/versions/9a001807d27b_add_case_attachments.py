@@ -48,12 +48,12 @@ def upgrade() -> None:
         sa.Column("owner_id", sa.UUID(), nullable=False),
         sa.Column("id", sa.UUID(), nullable=False),
         sa.Column("sha256", sa.String(length=64), nullable=False),
-        sa.Column("name", sa.String(length=255), nullable=False),
+        sa.Column("name", sa.String(), nullable=False),
         sa.Column("content_type", sa.String(length=100), nullable=False),
         sa.Column("size", sa.Integer(), nullable=False),
         sa.Column("creator_id", sa.UUID(), nullable=True),
         sa.Column("deleted_at", sa.TIMESTAMP(timezone=True), nullable=True),
-        sa.PrimaryKeyConstraint("surrogate_id"),
+        sa.PrimaryKeyConstraint("surrogate_id", name="file_pkey"),
     )
     op.create_index(op.f("ix_file_id"), "file", ["id"], unique=True)
     op.create_index(op.f("ix_file_sha256"), "file", ["sha256"], unique=False)
@@ -74,9 +74,19 @@ def upgrade() -> None:
         sa.Column("id", sa.UUID(), nullable=False),
         sa.Column("case_id", sa.UUID(), nullable=False),
         sa.Column("file_id", sa.UUID(), nullable=False),
-        sa.ForeignKeyConstraint(["case_id"], ["cases.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["file_id"], ["file.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
+        sa.ForeignKeyConstraint(
+            ["case_id"],
+            ["cases.id"],
+            ondelete="CASCADE",
+            name="case_attachment_case_id_fkey",
+        ),
+        sa.ForeignKeyConstraint(
+            ["file_id"],
+            ["file.id"],
+            ondelete="CASCADE",
+            name="case_attachment_file_id_fkey",
+        ),
+        sa.PrimaryKeyConstraint("id", name="case_attachment_pkey"),
         sa.UniqueConstraint("case_id", "file_id", name="uq_case_attachment_case_file"),
     )
     op.create_index(

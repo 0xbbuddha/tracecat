@@ -14,10 +14,8 @@ import tracecat_registry.integrations.aws_boto3 as boto3_module
 from dotenv import load_dotenv
 from minio import Minio
 from minio.error import S3Error
-from sqlalchemy import create_engine, text
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlmodel import SQLModel
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from temporalio.client import Client
 from temporalio.worker import Worker
 
@@ -26,7 +24,7 @@ from tracecat import config
 from tracecat.auth.types import AccessLevel, Role, system_role
 from tracecat.contexts import ctx_role
 from tracecat.db.engine import get_async_engine, get_async_session_context_manager
-from tracecat.db.models import Workspace
+from tracecat.db.models import Base, Workspace
 from tracecat.dsl.client import get_temporal_client
 from tracecat.dsl.plugins import TracecatPydanticAIPlugin
 from tracecat.dsl.worker import get_activities, new_sandbox_runner
@@ -66,6 +64,7 @@ MINIO_CONTAINER_NAME = f"test-minio-{WORKER_ID}"
 REDIS_BASE_PORT = 6380
 REDIS_PORT = str(REDIS_BASE_PORT + WORKER_OFFSET)
 REDIS_CONTAINER_NAME = f"test-redis-{WORKER_ID}"
+DOCKER_RUN_TIMEOUT_SECONDS = int(os.getenv("TRACECAT_TEST_DOCKER_RUN_TIMEOUT", "60"))
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +112,7 @@ def redis_server():
         ],
         check=True,
         capture_output=True,
-        timeout=20,
+        timeout=DOCKER_RUN_TIMEOUT_SECONDS,
     )
 
     # Wait until Redis is ready
@@ -210,6 +209,7 @@ def db() -> Iterator[None]:
         """
     )
 
+    test_engine: Any = None
     try:
         with default_engine.connect() as conn:
             # Terminate existing connections
@@ -222,10 +222,11 @@ def db() -> Iterator[None]:
         test_engine = create_engine(TEST_DB_CONFIG.test_url_sync)
         with test_engine.begin() as conn:
             logger.info("Creating all tables")
-            SQLModel.metadata.create_all(conn)
+            Base.metadata.create_all(conn)
         yield
     finally:
-        test_engine.dispose()
+        if test_engine is not None:
+            test_engine.dispose()
         # # Cleanup - reconnect to system db to drop test db
         with default_engine.begin() as conn:
             conn.execute(termination_query)
@@ -381,13 +382,12 @@ async def test_workspace():
         # Create new test workspace
         workspace = await svc.create_workspace(name=workspace_name, override_id=ws_id)
 
-        logger.info("Created test workspace", workspace=workspace)
-
+        logger.debug("Created test workspace", workspace=workspace)
         try:
             yield workspace
         finally:
             # Clean up the workspace
-            logger.info("Teardown test workspace")
+            logger.debug("Teardown test workspace")
             try:
                 await svc.delete_workspace(ws_id)
             except Exception as e:
@@ -415,7 +415,7 @@ async def db_session_with_repo(test_role):
     async with RegistryReposService.with_session(role=test_role) as svc:
         db_repo = await svc.create_repository(
             RegistryRepositoryCreate(
-                origin="git+ssh://git@github.com/TracecatHQ/dummy-repo.git"
+                origin=f"git+ssh://git@github.com/TracecatHQ/dummy-repo-{uuid.uuid4().hex[:8]}.git"
             )
         )
         try:
@@ -433,14 +433,49 @@ async def svc_workspace(session: AsyncSession) -> AsyncGenerator[Workspace, None
     """Service test fixture. Create a function scoped test workspace."""
     workspace = Workspace(
         name="test-workspace",
-        owner_id=config.TRACECAT__DEFAULT_ORG_ID,
+        organization_id=config.TRACECAT__DEFAULT_ORG_ID,
     )
     session.add(workspace)
     await session.commit()
+
+    # Also persist the workspace in the default engine used by BaseWorkspaceService
+    # so services that use `with_session()` (and thus `get_async_session_context_manager`)
+    # can see the same workspace and satisfy foreign key constraints.
+    async with get_async_session_context_manager() as global_session:
+        # Avoid duplicate insert if the workspace already exists
+        result = await global_session.execute(
+            select(Workspace).where(Workspace.id == workspace.id)
+        )
+        existing = result.scalar_one_or_none()
+        if existing is None:
+            global_session.add(
+                Workspace(
+                    id=workspace.id,
+                    name=workspace.name,
+                    organization_id=workspace.organization_id,
+                )
+            )
+            await global_session.commit()
+
     try:
         yield workspace
     finally:
-        logger.info("Cleaning up test workspace")
+        logger.debug("Cleaning up test workspace")
+        # Clean up workspace from global session (postgres database) first
+        try:
+            async with get_async_session_context_manager() as global_cleanup_session:
+                result = await global_cleanup_session.execute(
+                    select(Workspace).where(Workspace.id == workspace.id)
+                )
+                global_workspace = result.scalar_one_or_none()
+                if global_workspace:
+                    await global_cleanup_session.delete(global_workspace)
+                    await global_cleanup_session.commit()
+                    logger.debug("Cleaned up workspace from global session")
+        except Exception as e:
+            logger.error(f"Error cleaning up workspace from global session: {e}")
+
+        # Clean up workspace from test session
         try:
             if session.is_active:
                 # Reset transaction state in case it was aborted
@@ -455,8 +490,11 @@ async def svc_workspace(session: AsyncSession) -> AsyncGenerator[Workspace, None
                     # If that fails, try with a completely new session
                     await session.close()
                     async with get_async_session_context_manager() as new_session:
-                        # Fetch the workspace again in the new session
-                        db_workspace = await new_session.get(Workspace, workspace.id)
+                        # Fetch the workspace again in the new session by logical ID
+                        result = await new_session.execute(
+                            select(Workspace).where(Workspace.id == workspace.id)
+                        )
+                        db_workspace = result.scalar_one_or_none()
                         if db_workspace:
                             await new_session.delete(db_workspace)
                             await new_session.commit()
@@ -530,7 +568,7 @@ def minio_server():
             check=True,
             capture_output=True,
             # Add timeout
-            timeout=20,
+            timeout=DOCKER_RUN_TIMEOUT_SECONDS,
         )
 
         # Wait for MinIO to be ready

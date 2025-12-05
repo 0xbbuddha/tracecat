@@ -10,7 +10,8 @@ from httpx import Response
 from pydantic import SecretStr
 
 from tracecat import config
-from tracecat.db.models import BaseSecret
+from tracecat.auth.types import Role
+from tracecat.db.models import Secret
 from tracecat.exceptions import TracecatExpressionError
 from tracecat.expressions.common import (
     ExprContext,
@@ -37,10 +38,15 @@ from tracecat.expressions.validator.validator import (
     TemplateActionValidationContext,
 )
 from tracecat.logger import logger
+from tracecat.secrets.constants import DEFAULT_SECRETS_ENVIRONMENT
 from tracecat.secrets.encryption import decrypt_keyvalues, encrypt_keyvalues
-from tracecat.secrets.schemas import SecretKeyValue
+from tracecat.secrets.enums import SecretType
+from tracecat.secrets.schemas import SecretKeyValue, SecretRead
 from tracecat.validation.common import get_validators
-from tracecat.validation.schemas import ExprValidationResult, ValidationDetail
+from tracecat.validation.schemas import (
+    ExprBaseValidationResult,
+    ValidationDetail,
+)
 from tracecat.variables.schemas import VariableCreate
 from tracecat.variables.service import VariablesService
 
@@ -358,7 +364,7 @@ def mixed_args_obj(simple_secret_expr, complex_secret_expr):
 # ------------------------------ Corner case tests ------------------------------ #
 
 
-def test_evaluate_templated_secret(test_role):
+def test_evaluate_templated_secret(test_role: Role):
     TEST_SECRETS = {
         "my_secret": [
             SecretKeyValue(key="TEST_API_KEY_1", value=SecretStr("1234567890")),
@@ -417,7 +423,7 @@ def test_evaluate_templated_secret(test_role):
 
     base_secrets_url = f"{config.TRACECAT__API_URL}/secrets"
 
-    def format_secrets_as_json(secrets: list[BaseSecret]) -> dict[str, str]:
+    def format_secrets_as_json(secrets: list[SecretRead]) -> dict[str, str]:
         """Format secrets as a dict."""
         secret_dict = {}
         for secret in secrets:
@@ -429,18 +435,23 @@ def test_evaluate_templated_secret(test_role):
             }
         return secret_dict
 
-    def get_secret(secret_name: str):
+    def get_secret(secret_name: str) -> SecretRead:
         with httpx.Client(base_url=config.TRACECAT__API_URL) as client:
             response = client.get(f"/secrets/{secret_name}")
             response.raise_for_status()
-        return BaseSecret.model_validate(response.json())
+        return SecretRead.model_validate(response.json())
 
     with respx.mock:
         # Mock workflow getter from API side
         for secret_name, secret_keys in TEST_SECRETS.items():
-            secret = BaseSecret(
+            secret = Secret(
+                id=f"secret_{uuid.uuid4().hex}",
                 name=secret_name,
-                owner_id=uuid.uuid4(),
+                workspace_id=uuid.uuid4(),
+                # Explicitly set the concrete secret type so enums can be resolved during serialization.
+                type=SecretType.CUSTOM.value,
+                # Ensure the environment matches the default API environment to mimic production payloads.
+                environment=DEFAULT_SECRETS_ENVIRONMENT,
                 encrypted_keys=encrypt_keyvalues(
                     secret_keys, key=os.environ["TRACECAT__DB_ENCRYPTION_KEY"]
                 ),
@@ -448,13 +459,11 @@ def test_evaluate_templated_secret(test_role):
                 updated_at=datetime.now(),
                 tags=None,
             )
+            secret_payload = SecretRead.from_database(secret).model_dump(mode="json")
 
             # Mock hitting get secrets endpoint
             respx.get(f"{base_secrets_url}/{secret_name}").mock(
-                return_value=Response(
-                    200,
-                    json=secret.model_dump(mode="json"),
-                )
+                return_value=Response(200, json=secret_payload)
             )
 
         # Start test
@@ -1012,6 +1021,50 @@ def test_jsonpath_wildcard():
     assert actual == [1]
 
 
+def test_jsonpath_filter_returns_list():
+    context = {
+        ExprContext.ACTIONS: {
+            "parse_event": {
+                "result": {
+                    "included": [
+                        {
+                            "attributes": {
+                                "incident_role": {
+                                    "data": {"attributes": {"slug": "primary-role"}}
+                                }
+                            }
+                        },
+                        {
+                            "attributes": {
+                                "incident_role": {
+                                    "data": {"attributes": {"slug": "secondary-role"}}
+                                }
+                            }
+                        },
+                    ]
+                }
+            }
+        }
+    }
+
+    expr = 'ACTIONS.parse_event.result.included[?(@.attributes.incident_role.data.attributes.slug != "primary-role")].attributes.incident_role.data.attributes.slug'
+    parser = ExprParser()
+    parse_tree = parser.parse(expr)
+    assert parse_tree is not None
+    ev = ExprEvaluator(operand=context)
+    actual = ev.transform(parse_tree)
+    assert actual == ["secondary-role"]
+
+    expr = "ACTIONS.parse_event.result.included[?(@.attributes.incident_role.data.attributes.slug)].attributes.incident_role.data.attributes.slug"
+    parse_tree = parser.parse(expr)
+    assert parse_tree is not None
+    actual = ev.transform(parse_tree)
+    assert actual == [
+        "primary-role",
+        "secondary-role",
+    ]
+
+
 def test_time_funcs():
     time_now_expr = "${{ FN.now() }}"
     dt = eval_templated_object(time_now_expr)
@@ -1073,7 +1126,7 @@ def test_parser_error():
 
 
 def assert_validation_result(
-    res: ExprValidationResult,
+    res: ExprBaseValidationResult,
     *,
     type: ExprType,
     status: Literal["success", "error"],

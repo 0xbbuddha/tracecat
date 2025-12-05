@@ -8,7 +8,7 @@ Requires: A secret named `ldap` with the following keys:
 
 """
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Protocol
 
 import ldap3
 import orjson
@@ -31,6 +31,33 @@ ldap_secret = RegistrySecret(
 """
 
 
+class LdapConnectionProtocol(Protocol):
+    @property
+    def entries(self) -> list[Any]: ...
+
+    @property
+    def result(self) -> dict[str, Any]: ...
+
+    def unbind(self) -> None: ...
+
+    def add(
+        self,
+        dn: str,
+        object_class: str,
+        attributes: dict[str, Any],
+    ) -> bool: ...
+
+    def delete(self, dn: str) -> bool: ...
+
+    def modify(
+        self,
+        dn: str,
+        changes: dict[str, list[tuple[str, list[str | int]]]],
+    ) -> bool: ...
+
+    def search(self, *args: Any, **kwargs: Any) -> bool: ...
+
+
 class LdapClient:
     def __init__(
         self,
@@ -47,6 +74,7 @@ class LdapClient:
         self.password = password
         self.server_kwargs = server_kwargs or {}
         self.connection_kwargs = connection_kwargs or {}
+        self.connection: LdapConnectionProtocol | None = None
 
     def __enter__(self):
         server = ldap3.Server(
@@ -68,57 +96,87 @@ class LdapClient:
         if self.connection:
             self.connection.unbind()
 
+    def _get_connection(self) -> LdapConnectionProtocol:
+        if not self.connection:
+            msg = "LDAP connection has not been established"
+            raise RuntimeError(msg)
+        return self.connection
+
     def add_entry(
         self,
         dn: str,
         object_class: str,
         attributes: dict[str, Any],
     ) -> None:
-        result = self.connection.add(
+        connection = self._get_connection()
+        result = connection.add(
             dn,
             object_class=object_class,
             attributes=attributes,
         )
         if not result:
-            raise PermissionError(self.connection.result)
+            raise PermissionError(connection.result)
 
     def delete_entry(self, dn: str) -> None:
-        result = self.connection.delete(dn)
+        connection = self._get_connection()
+        result = connection.delete(dn)
         if not result:
-            raise PermissionError(self.connection.result)
+            raise PermissionError(connection.result)
 
     def modify_entry(
         self,
         dn: str,
         changes: dict[str, list[tuple[str, list[str | int]]]],
     ) -> None:
-        result = self.connection.modify(dn, changes)
+        connection = self._get_connection()
+        result = connection.modify(dn, changes)
         if not result:
-            raise PermissionError(self.connection.result)
+            raise PermissionError(connection.result)
 
     def search(
         self,
         search_base: str,
         search_filter: str,
-        search_scope: Literal["BASE", "ONE", "SUBTREE"] = "SUBTREE",
-        attributes: Literal["ALL_ATTRIBUTES", "ALL_OPERATIONAL_ATTRIBUTES"]
-        | list[str] = "ALL_ATTRIBUTES",
-        **kwargs,
     ) -> list[dict[str, Any]]:
-        scope = getattr(ldap3, search_scope)
-        if isinstance(attributes, str):
-            attributes = getattr(ldap3, attributes)
+        """Search the LDAP directory.
 
-        entries = self.connection.search(
+        Args:
+            search_base: The base of the search request.
+            search_filter: The filter of the search request (RFC4515 syntax).
+
+        Returns:
+            List of search result entries, each containing 'dn' and 'attributes'.
+
+        Raises:
+            RuntimeError: If the search operation fails.
+        """
+        connection = self._get_connection()
+
+        result = connection.search(
             search_base=search_base,
             search_filter=search_filter,
-            search_scope=scope,
-            attributes=attributes,
-            **kwargs,
+            search_scope=ldap3.SUBTREE,
+            attributes=ldap3.ALL_ATTRIBUTES,
         )
-        if entries:
-            return [orjson.loads(entry.entry_to_json()) for entry in entries]
-        return []
+
+        if result:
+            # Format entries as list of dicts with dn and attributes
+            entries = []
+            for entry in connection.entries:
+                # Use entry_to_json() to handle serialization of ldap3 types
+                entry_json = orjson.loads(entry.entry_to_json())
+                entries.append(
+                    {
+                        "dn": entry.entry_dn,
+                        "attributes": entry_json["attributes"],
+                    }
+                )
+
+            return entries
+        else:
+            # Search operation failed - check connection.result for error details
+            error_msg = f"LDAP search failed: {connection.result}"
+            raise RuntimeError(error_msg)
 
 
 def get_ldap_secrets() -> dict[str, Any]:
@@ -225,15 +283,17 @@ def modify_entry(
     secrets=[ldap_secret],
 )
 def search_entries(
-    search_base: Annotated[str, Field(..., description="Search base")],
-    search_filter: Annotated[str, Field(..., description="Search filter")],
-    search_scope: Annotated[
-        Literal["BASE", "ONE", "SUBTREE"], Field(..., description="Search scope")
-    ] = "SUBTREE",
-    attributes: Annotated[
-        Literal["ALL_ATTRIBUTES", "ALL_OPERATIONAL_ATTRIBUTES"] | list[str],
-        Field(..., description="Attributes to return"),
-    ] = "ALL_ATTRIBUTES",
+    search_base: Annotated[str, Field(..., description="Search base DN")],
+    search_filter: Annotated[
+        str,
+        Field(
+            ...,
+            description=(
+                "LDAP search filter (RFC4515 syntax). "
+                "Example: '(cn=John*)' or '(&(objectClass=person)(mail=*@example.com))'"
+            ),
+        ),
+    ],
     server_kwargs: Annotated[
         dict[str, Any] | None, Field(..., description="Additional server parameters")
     ] = None,
@@ -242,9 +302,18 @@ def search_entries(
         Field(..., description="Additional connection parameters"),
     ] = None,
 ) -> list[dict[str, Any]]:
+    """Search the LDAP directory for entries matching the query.
+
+    Returns a list of entries, each containing:
+    - dn: Distinguished name of the entry
+    - attributes: Dictionary mapping attribute names to lists of values
+    """
     with LdapClient(
         **get_ldap_secrets(),
         server_kwargs=server_kwargs,
         connection_kwargs=connection_kwargs,
     ) as client:
-        return client.search(search_base, search_filter, search_scope, attributes)
+        return client.search(
+            search_base=search_base,
+            search_filter=search_filter,
+        )

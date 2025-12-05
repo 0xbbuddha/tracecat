@@ -1,5 +1,6 @@
 """Tests for core.table UDFs in the registry."""
 
+import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -8,7 +9,7 @@ import orjson
 import pytest
 from asyncpg import DuplicateTableError
 from sqlalchemy.exc import ProgrammingError
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 from tracecat_registry.core.table import (
     create_table,
     delete_row,
@@ -31,12 +32,35 @@ from tracecat.tables.service import TablesService
 
 
 @pytest.fixture
+def patched_session_context(session: AsyncSession):
+    """Fixture to patch get_async_session_context_manager to use the test session.
+
+    This is needed for integration tests that call UDFs directly, which internally
+    use TablesService.with_session(). Without this patch, the service creates a
+    new session that can't see data in the test's savepoint transaction.
+    """
+
+    @contextlib.asynccontextmanager
+    async def mock_session_cm():
+        yield session
+
+    def create_mock_cm():
+        return mock_session_cm()
+
+    with patch(
+        "tracecat.service.get_async_session_context_manager",
+        side_effect=create_mock_cm,
+    ):
+        yield
+
+
+@pytest.fixture
 def mock_table():
     """Create a mock table for testing."""
     table = MagicMock()
     table.id = uuid.uuid4()
     table.name = "test_table"
-    table.model_dump.return_value = {
+    table.to_dict.return_value = {
         "id": str(table.id),
         "name": table.name,
         "created_at": datetime.now(UTC),
@@ -409,8 +433,8 @@ class TestCoreCreateTable:
         assert table_create_arg.name == "test_table"
         assert table_create_arg.columns == []
 
-        # Verify the result
-        assert result == mock_table.model_dump.return_value
+        # Verify the result matches the table's dict representation
+        assert result == mock_table.to_dict.return_value
 
     @patch("tracecat_registry.core.table.TablesService.with_session")
     async def test_create_table_with_columns(self, mock_with_session, mock_table):
@@ -453,8 +477,8 @@ class TestCoreCreateTable:
         assert col2.nullable is False
         assert col2.default == 0
 
-        # Verify the result
-        assert result == mock_table.model_dump.return_value
+        # Verify the result matches the table's dict representation
+        assert result == mock_table.to_dict.return_value
 
     @patch("tracecat_registry.core.table.TablesService.with_session")
     async def test_create_table_raise_on_duplicate_true_raises_on_duplicate(
@@ -534,8 +558,8 @@ class TestCoreCreateTable:
         # Assert get_table_by_name was called to fetch existing table
         mock_service.get_table_by_name.assert_called_once_with("test_table")
 
-        # Verify the result is the existing table
-        assert result == mock_table.model_dump.return_value
+        # Verify the result is the existing table's dict representation
+        assert result == mock_table.to_dict.return_value
 
     @patch("tracecat_registry.core.table.TablesService.with_session")
     async def test_create_table_raise_on_duplicate_propagates_other_errors(
@@ -982,7 +1006,11 @@ class TestCoreTableIntegration:
     pytestmark = pytest.mark.usefixtures("db")
 
     async def test_create_table_with_columns_integration(
-        self, session: AsyncSession, svc_workspace: Workspace, svc_admin_role: Role
+        self,
+        session: AsyncSession,
+        svc_workspace: Workspace,
+        svc_admin_role: Role,
+        patched_session_context,
     ):
         """Test that create_table UDF actually creates columns in the database.
 
@@ -1071,7 +1099,11 @@ class TestCoreTableIntegration:
             ctx_role.reset(token)
 
     async def test_create_table_without_columns_integration(
-        self, session: AsyncSession, svc_workspace: Workspace, svc_admin_role: Role
+        self,
+        session: AsyncSession,
+        svc_workspace: Workspace,
+        svc_admin_role: Role,
+        patched_session_context,
     ):
         """Test creating a table without predefined columns."""
         # Set the role context for the UDF
@@ -1094,7 +1126,11 @@ class TestCoreTableIntegration:
             ctx_role.reset(token)
 
     async def test_list_tables_integration(
-        self, session: AsyncSession, svc_workspace: Workspace, svc_admin_role: Role
+        self,
+        session: AsyncSession,
+        svc_workspace: Workspace,
+        svc_admin_role: Role,
+        patched_session_context,
     ):
         """Test listing tables after creation."""
         # Set the role context for the UDF
@@ -1225,7 +1261,11 @@ class TestCoreTableIntegration:
         assert result == 3
 
     async def test_create_table_raise_on_duplicate_false_integration(
-        self, session: AsyncSession, svc_workspace: Workspace, svc_admin_role: Role
+        self,
+        session: AsyncSession,
+        svc_workspace: Workspace,
+        svc_admin_role: Role,
+        patched_session_context,
     ):
         """Test that create_table with raise_on_duplicate=False returns existing table."""
         # Set the role context for the UDF
@@ -1265,7 +1305,11 @@ class TestCoreTableIntegration:
             ctx_role.reset(token)
 
     async def test_create_table_duplicate_with_raise_on_duplicate_true_integration(
-        self, session: AsyncSession, svc_workspace: Workspace, svc_admin_role: Role
+        self,
+        session: AsyncSession,
+        svc_workspace: Workspace,
+        svc_admin_role: Role,
+        patched_session_context,
     ):
         """Test that create_table raises error on duplicate with raise_on_duplicate=True."""
         # Set the role context for the UDF

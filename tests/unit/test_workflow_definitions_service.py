@@ -3,7 +3,7 @@ from datetime import datetime
 
 import pytest
 import yaml
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tracecat.auth.types import Role
 from tracecat.db.models import Workflow, Workspace
@@ -29,7 +29,7 @@ async def workflow_id(
     """Create a test workflow in the database and return its ID."""
     workflow = Workflow(
         title="test-workflow",
-        owner_id=svc_workspace.id,
+        workspace_id=svc_workspace.id,
         description="Test workflow for definitions testing",
         status="active",
         entrypoint=None,

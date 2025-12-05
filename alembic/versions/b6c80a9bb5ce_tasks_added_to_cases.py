@@ -9,7 +9,6 @@ Create Date: 2025-10-23 23:48:44.091444
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-import sqlmodel.sql.sqltypes
 from alembic_postgresql_enum import TableReference
 from sqlalchemy.dialects import postgresql
 
@@ -42,11 +41,11 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("surrogate_id", sa.Integer(), nullable=False),
-        sa.Column("owner_id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
+        sa.Column("owner_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("case_id", sa.UUID(), nullable=False),
-        sa.Column("title", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-        sa.Column("description", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("title", sa.String(), nullable=False),
+        sa.Column("description", sa.String(), nullable=True),
         sa.Column(
             "priority",
             postgresql.ENUM(
@@ -75,10 +74,25 @@ def upgrade() -> None:
         ),
         sa.Column("assignee_id", sa.UUID(), nullable=True),
         sa.Column("workflow_id", sa.UUID(), nullable=True),
-        sa.ForeignKeyConstraint(["assignee_id"], ["user.id"], ondelete="SET NULL"),
-        sa.ForeignKeyConstraint(["case_id"], ["cases.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["workflow_id"], ["workflow.id"], ondelete="SET NULL"),
-        sa.PrimaryKeyConstraint("surrogate_id"),
+        sa.ForeignKeyConstraint(
+            ["assignee_id"],
+            ["user.id"],
+            ondelete="SET NULL",
+            name="case_tasks_assignee_id_fkey",
+        ),
+        sa.ForeignKeyConstraint(
+            ["case_id"],
+            ["cases.id"],
+            ondelete="CASCADE",
+            name="case_tasks_case_id_fkey",
+        ),
+        sa.ForeignKeyConstraint(
+            ["workflow_id"],
+            ["workflow.id"],
+            ondelete="SET NULL",
+            name="case_tasks_workflow_id_fkey",
+        ),
+        sa.PrimaryKeyConstraint("surrogate_id", name="case_tasks_pkey"),
     )
     op.create_index(op.f("ix_case_tasks_id"), "case_tasks", ["id"], unique=True)
     op.sync_enum_values(  # type: ignore[attr-defined]

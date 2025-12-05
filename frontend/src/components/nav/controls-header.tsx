@@ -11,14 +11,13 @@ import {
   PanelRight,
   PenLine,
   Plus,
-  SlidersHorizontal,
   Trash2,
   User,
   X,
 } from "lucide-react"
 import Link from "next/link"
 import { usePathname, useSearchParams } from "next/navigation"
-import { type ReactNode, useState } from "react"
+import { Fragment, type ReactNode, useState } from "react"
 import type { CaseStatus, OAuthGrantType } from "@/client"
 import { AddCaseDuration } from "@/components/cases/add-case-duration"
 import { AddCustomField } from "@/components/cases/add-custom-field"
@@ -134,6 +133,69 @@ function WorkflowsActions() {
         currentFolderPath={currentPath}
       />
     </>
+  )
+}
+
+function WorkflowsBreadcrumb({
+  workspaceId,
+  path,
+}: {
+  workspaceId: string
+  path: string | null
+}) {
+  const normalizePath = (folderPath: string | null) => {
+    if (!folderPath || folderPath === "/") return "/"
+    const pathWithLeadingSlash = folderPath.startsWith("/")
+      ? folderPath
+      : `/${folderPath}`
+    return pathWithLeadingSlash.endsWith("/") && pathWithLeadingSlash !== "/"
+      ? pathWithLeadingSlash.slice(0, -1)
+      : pathWithLeadingSlash
+  }
+
+  const normalizedPath = normalizePath(path)
+  const segments = normalizedPath.split("/").filter(Boolean)
+  const baseHref = `/workspaces/${workspaceId}/workflows`
+  const getFolderHref = (folderPath: string) => {
+    if (folderPath === "/") return baseHref
+    return `${baseHref}?path=${encodeURIComponent(folderPath)}`
+  }
+
+  return (
+    <Breadcrumb>
+      <BreadcrumbList className="relative z-10 flex items-center gap-2 text-sm flex-nowrap overflow-hidden whitespace-nowrap min-w-0 bg-transparent pr-1">
+        <BreadcrumbItem>
+          <BreadcrumbLink asChild className="font-semibold hover:no-underline">
+            <Link href={baseHref}>Workflows</Link>
+          </BreadcrumbLink>
+        </BreadcrumbItem>
+        {segments.map((segment, index) => {
+          const folderPath = `/${segments.slice(0, index + 1).join("/")}`
+          const isLast = index === segments.length - 1
+          return (
+            <Fragment key={folderPath}>
+              <BreadcrumbSeparator className="shrink-0">
+                <span className="text-muted-foreground">/</span>
+              </BreadcrumbSeparator>
+              <BreadcrumbItem>
+                {isLast ? (
+                  <BreadcrumbPage className="font-semibold">
+                    {segment}
+                  </BreadcrumbPage>
+                ) : (
+                  <BreadcrumbLink
+                    asChild
+                    className="font-semibold hover:no-underline"
+                  >
+                    <Link href={getFolderHref(folderPath)}>{segment}</Link>
+                  </BreadcrumbLink>
+                )}
+              </BreadcrumbItem>
+            </Fragment>
+          )
+        })}
+      </BreadcrumbList>
+    </Breadcrumb>
   )
 }
 
@@ -553,26 +615,6 @@ function CasesSelectionActionsBar() {
   )
 }
 
-function AgentsActions() {
-  const workspaceId = useWorkspaceId()
-
-  if (!workspaceId) {
-    return null
-  }
-
-  return (
-    <Button asChild size="sm" variant="outline" className="h-7 bg-white">
-      <Link
-        href={`/workspaces/${workspaceId}/agents/presets`}
-        className="flex items-center gap-1.5"
-      >
-        <SlidersHorizontal className="h-3.5 w-3.5" />
-        Manage presets
-      </Link>
-    </Button>
-  )
-}
-
 function MembersActions() {
   const { workspace } = useWorkspaceDetails()
 
@@ -787,26 +829,6 @@ function IntegrationBreadcrumb({
   )
 }
 
-function AgentsBreadcrumb({ workspaceId }: { workspaceId: string }) {
-  return (
-    <Breadcrumb>
-      <BreadcrumbList className="relative z-10 flex items-center gap-2 text-sm flex-nowrap overflow-hidden whitespace-nowrap min-w-0 bg-transparent pr-1">
-        <BreadcrumbItem>
-          <BreadcrumbLink asChild className="font-semibold hover:no-underline">
-            <Link href={`/workspaces/${workspaceId}/agents`}>Agents</Link>
-          </BreadcrumbLink>
-        </BreadcrumbItem>
-        <BreadcrumbSeparator className="shrink-0">
-          <span className="text-muted-foreground">/</span>
-        </BreadcrumbSeparator>
-        <BreadcrumbItem>
-          <BreadcrumbPage className="font-semibold">Presets</BreadcrumbPage>
-        </BreadcrumbItem>
-      </BreadcrumbList>
-    </Breadcrumb>
-  )
-}
-
 function getPageConfig(
   pathname: string,
   workspaceId: string,
@@ -820,21 +842,25 @@ function getPageConfig(
   // Match routes and return appropriate config
   if (pagePath === "/" || pagePath.startsWith("/workflows")) {
     return {
-      title: "Workflows",
+      title: (
+        <WorkflowsBreadcrumb
+          workspaceId={workspaceId}
+          path={searchParams?.get("path") ?? "/"}
+        />
+      ),
       actions: <WorkflowsActions />,
     }
   }
 
-  if (pagePath.startsWith("/agents")) {
-    if (pagePath.startsWith("/agents/presets")) {
-      return {
-        title: <AgentsBreadcrumb workspaceId={workspaceId} />,
-      }
+  if (pagePath.startsWith("/approvals")) {
+    return {
+      title: "Approvals",
     }
+  }
 
+  if (pagePath.startsWith("/agents")) {
     return {
       title: "Agents",
-      actions: <AgentsActions />,
     }
   }
 

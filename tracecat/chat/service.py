@@ -9,8 +9,8 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.tools import DeferredToolResults
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
-from sqlmodel import col, select
 
 import tracecat.agent.adapter.vercel
 from tracecat.agent.builder.tools import build_agent_preset_builder_tools
@@ -39,6 +39,7 @@ from tracecat.exceptions import TracecatNotFoundError
 from tracecat.identifiers import UserID
 from tracecat.logger import logger
 from tracecat.service import BaseWorkspaceService
+from tracecat.workspaces.prompts import WorkspaceCopilotPrompts
 
 
 class ChatService(BaseWorkspaceService):
@@ -69,7 +70,7 @@ class ChatService(BaseWorkspaceService):
             user_id=self.role.user_id,
             entity_type=entity_type,
             entity_id=entity_id,
-            owner_id=self.workspace_id,
+            workspace_id=self.workspace_id,
             tools=tools or get_default_tools(entity_type),
             agent_preset_id=agent_preset_id,
         )
@@ -111,6 +112,8 @@ class ChatService(BaseWorkspaceService):
                 )
             prompt = AgentPresetBuilderPrompt(preset=preset)
             return prompt.instructions
+        if entity_type == ChatEntity.COPILOT:
+            return WorkspaceCopilotPrompts().instructions
         else:
             raise ValueError(
                 f"Unsupported chat entity type: {entity_type}. Expected one of: {list(ChatEntity)}"
@@ -162,8 +165,9 @@ class ChatService(BaseWorkspaceService):
                         actions=chat.tools,
                     )
         elif chat_entity is ChatEntity.AGENT_PRESET:
+            # Live chat uses workspace-level credentials
             async with agent_svc.with_preset_config(
-                preset_id=chat.entity_id
+                preset_id=chat.entity_id, use_workspace_credentials=True
             ) as preset_config:
                 config = replace(preset_config)
                 if not config.actions and chat.tools:
@@ -186,6 +190,31 @@ class ChatService(BaseWorkspaceService):
                     "Agent preset builder requires a default AI model with valid provider credentials. "
                     "Configure the default model in Organization settings before chatting."
                 ) from exc
+        elif chat_entity is ChatEntity.COPILOT:
+            entity_instructions = await self._chat_entity_to_prompt(
+                chat.entity_type, chat
+            )
+            if chat.agent_preset_id:
+                async with agent_svc.with_preset_config(
+                    preset_id=chat.agent_preset_id
+                ) as preset_config:
+                    combined_instructions = (
+                        f"{preset_config.instructions}\n\n{entity_instructions}"
+                        if preset_config.instructions
+                        else entity_instructions
+                    )
+                    config = replace(preset_config, instructions=combined_instructions)
+                    if not config.actions and chat.tools:
+                        config.actions = chat.tools
+                    yield config
+            else:
+                async with agent_svc.with_model_config() as model_config:
+                    yield AgentConfig(
+                        instructions=entity_instructions,
+                        model_name=model_config.name,
+                        model_provider=model_config.provider,
+                        actions=chat.tools,
+                    )
         else:
             raise ValueError(
                 f"Unsupported chat entity type: {chat.entity_type}. Expected one of: {list(ChatEntity)}"
@@ -327,12 +356,12 @@ class ChatService(BaseWorkspaceService):
         """Get a chat by ID, ensuring it belongs to the current workspace."""
         stmt = select(Chat).where(
             Chat.id == chat_id,
-            Chat.owner_id == self.workspace_id,
+            Chat.workspace_id == self.workspace_id,
         )
         if with_messages:
-            stmt = stmt.options(selectinload(Chat.messages))  # type: ignore
-        result = await self.session.exec(stmt)
-        return result.first()
+            stmt = stmt.options(selectinload(Chat.messages))
+        result = await self.session.execute(stmt)
+        return result.scalars().first()
 
     async def list_chats(
         self,
@@ -344,7 +373,7 @@ class ChatService(BaseWorkspaceService):
     ) -> Sequence[Chat]:
         """List chats for the current workspace with optional entity filtering."""
 
-        stmt = select(Chat).where(Chat.owner_id == self.role.workspace_id)
+        stmt = select(Chat).where(Chat.workspace_id == self.role.workspace_id)
         if user_id:
             stmt = stmt.where(Chat.user_id == user_id)
 
@@ -354,10 +383,10 @@ class ChatService(BaseWorkspaceService):
         if entity_id:
             stmt = stmt.where(Chat.entity_id == entity_id)
 
-        stmt = stmt.order_by(col(Chat.created_at).desc()).limit(limit)
+        stmt = stmt.order_by(Chat.created_at.desc()).limit(limit)
 
-        result = await self.session.exec(stmt)
-        return result.all()
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
 
     async def update_chat(
         self,
@@ -404,7 +433,7 @@ class ChatService(BaseWorkspaceService):
         db_message = DBChatMessage(
             chat_id=chat_id,
             kind=kind.value,
-            owner_id=self.workspace_id,
+            workspace_id=self.workspace_id,
             data=ModelMessageTA.dump_python(message, mode="json"),
         )
 
@@ -436,7 +465,7 @@ class ChatService(BaseWorkspaceService):
             DBChatMessage(
                 chat_id=chat_id,
                 kind=kind.value,
-                owner_id=self.workspace_id,
+                workspace_id=self.workspace_id,
                 data=ModelMessageTA.dump_python(message, mode="json"),
             )
             for message in messages
@@ -465,18 +494,16 @@ class ChatService(BaseWorkspaceService):
             select(DBChatMessage)
             .where(
                 DBChatMessage.chat_id == chat_id,
-                DBChatMessage.owner_id == self.workspace_id,
+                DBChatMessage.workspace_id == self.workspace_id,
             )
-            .order_by(col(DBChatMessage.created_at).asc())
+            .order_by(DBChatMessage.created_at.asc())
         )
 
         if kinds:
-            stmt = stmt.where(
-                col(DBChatMessage.kind).in_({kind.value for kind in kinds})
-            )
+            stmt = stmt.where(DBChatMessage.kind.in_({kind.value for kind in kinds}))
 
-        result = await self.session.exec(stmt)
-        db_messages = result.all()
+        result = await self.session.execute(stmt)
+        db_messages = result.scalars().all()
 
         messages: list[ModelMessage] = []
         for db_msg in db_messages:

@@ -14,7 +14,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile
 
   api:
-    image: ghcr.io/tracecathq/tracecat:${TRACECAT__IMAGE_TAG:-0.50.1}
+    image: ghcr.io/tracecathq/tracecat:${TRACECAT__IMAGE_TAG:-0.52.2}
     container_name: api
     restart: unless-stopped
     networks:
@@ -76,6 +76,8 @@ services:
     volumes:
       - ${TRACECAT__LOCAL_REPOSITORY_PATH}:/app/local_registry
     depends_on:
+      postgres_db:
+        condition: service_healthy
       temporal:
         condition: service_healthy
       minio:
@@ -84,7 +86,7 @@ services:
         condition: service_healthy
 
   worker:
-    image: ghcr.io/tracecathq/tracecat:${TRACECAT__IMAGE_TAG:-0.50.1}
+    image: ghcr.io/tracecathq/tracecat:${TRACECAT__IMAGE_TAG:-0.52.2}
     restart: unless-stopped
     networks:
       - core
@@ -111,16 +113,22 @@ services:
       TRACECAT__LOCAL_REPOSITORY_PATH: ${TRACECAT__LOCAL_REPOSITORY_PATH}
       TRACECAT__LOCAL_REPOSITORY_ENABLED: ${TRACECAT__LOCAL_REPOSITORY_ENABLED}
       # Sentry
-      SENTRY_DSN: ${SENTRY_DSN}
+      SENTRY_DSN: ${SENTRY_DSN:-}
     volumes:
       - ${TRACECAT__LOCAL_REPOSITORY_PATH}:/app/local_registry
     command: ["python", "-m", "tracecat.dsl.worker"]
     depends_on:
-      - api
-      - temporal
+      postgres_db:
+        condition: service_healthy
+      api:
+        condition: service_started
+      temporal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   executor:
-    image: ghcr.io/tracecathq/tracecat:${TRACECAT__IMAGE_TAG:-0.50.1}
+    image: ghcr.io/tracecathq/tracecat:${TRACECAT__IMAGE_TAG:-0.52.2}
     restart: unless-stopped
     networks:
       - core-db
@@ -144,9 +152,9 @@ services:
       REDIS_PORT: ${REDIS_PORT}
       REDIS_URL: ${REDIS_URL}
       # Langfuse
-      LANGFUSE_HOST: ${LANGFUSE_HOST}
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
     volumes:
       - ${TRACECAT__LOCAL_REPOSITORY_PATH}:/app/local_registry
     command:
@@ -161,11 +169,15 @@ services:
         "8000",
       ]
     depends_on:
-      - temporal
-      - redis
+      postgres_db:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   ui:
-    image: ghcr.io/tracecathq/tracecat-ui:${TRACECAT__IMAGE_TAG:-0.50.1}
+    image: ghcr.io/tracecathq/tracecat-ui:${TRACECAT__IMAGE_TAG:-0.52.2}
     container_name: ui
     restart: unless-stopped
     networks:
@@ -193,6 +205,12 @@ services:
       POSTGRES_PASSWORD: ${TRACECAT__POSTGRES_PASSWORD}
     volumes:
       - core-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
 
   temporal_postgres_db:
     image: postgres:13
@@ -224,10 +242,10 @@ services:
       - BIND_ON_IP=0.0.0.0
       - TEMPORAL_BROADCAST_ADDRESS=127.0.0.1
     healthcheck:
-      test: ['CMD', 'tctl', '--address', '127.0.0.1:7233', 'cluster', 'health']
-      interval: 1s
-      timeout: 5s
-      start_period: 2s
+      test: ["CMD", "tctl", "--address", "temporal:7233", "cluster", "health"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
     depends_on:
       - temporal_postgres_db
 

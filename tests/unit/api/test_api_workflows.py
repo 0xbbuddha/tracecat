@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError, NoResultFound
 from tracecat.auth.types import Role
 from tracecat.db.models import Action, Schedule, Tag, Webhook, Workflow, Workspace
 from tracecat.pagination import CursorPaginatedResponse
+from tracecat.workflow.management import router as workflow_management_router
 from tracecat.workflow.management.types import WorkflowDefinitionMinimal
 
 
@@ -26,7 +27,7 @@ def mock_workflow(test_workspace: Workspace) -> Workflow:
         description="Test workflow description",
         status="online",
         version=1,
-        owner_id=test_workspace.id,
+        workspace_id=test_workspace.id,
         entrypoint="action-1",
         expects={"input": {"type": "string"}},
         returns=None,
@@ -45,10 +46,13 @@ def mock_workflow(test_workspace: Workspace) -> Workflow:
 def mock_webhook(test_workspace: Workspace, mock_workflow: Workflow) -> Webhook:
     """Create a mock webhook DB object."""
     return Webhook(
-        owner_id=test_workspace.id,
+        id="wh-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        workspace_id=test_workspace.id,
         workflow_id=mock_workflow.id,
         status="online",
+        methods=["POST"],
         filters={},
+        allowlisted_cidrs=[],
         created_at=datetime(2024, 1, 1, tzinfo=UTC),
         updated_at=datetime(2024, 1, 1, tzinfo=UTC),
     )
@@ -62,8 +66,8 @@ async def test_list_workflows_success(
 ) -> None:
     """Test GET /workflows returns paginated list of workflows."""
     # Mock service layer
-    with patch(
-        "tracecat.workflow.management.router.WorkflowsManagementService"
+    with patch.object(
+        workflow_management_router, "WorkflowsManagementService"
     ) as MockService:
         # Create mock service instance
         mock_svc = AsyncMock()
@@ -168,7 +172,7 @@ async def test_list_workflows_with_tag_filter(
             id=uuid.uuid4(),
             name="test-tag",
             ref="test-tag",
-            owner_id=mock_workflow.owner_id,
+            workspace_id=mock_workflow.workspace_id,
             created_at=datetime(2024, 1, 1, tzinfo=UTC),
             updated_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
@@ -401,7 +405,7 @@ async def test_update_workflow_duplicate_alias(
     ):
         mock_svc = AsyncMock()
         # Create a proper IntegrityError with UniqueViolationError as cause
-        unique_error = AsyncpgUniqueViolationError("uq_workflow_alias_owner_id")
+        unique_error = AsyncpgUniqueViolationError("uq_workflow_alias_workspace_id")
         integrity_error = IntegrityError("", {}, unique_error)
         mock_svc.update_workflow.side_effect = integrity_error
         MockService.return_value = mock_svc
@@ -495,7 +499,7 @@ async def test_get_workflow_with_relationships(
             id=uuid.uuid4(),
             name="production",
             ref="production",
-            owner_id=test_workspace.id,
+            workspace_id=test_workspace.id,
             created_at=datetime(2024, 1, 1, tzinfo=UTC),
             updated_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
@@ -507,13 +511,16 @@ async def test_get_workflow_with_relationships(
             status="online",
             inputs="",  # inputs is a YAML string, not dict
             control_flow={},
-            owner_id=test_workspace.id,
+            is_interactive=False,
+            workspace_id=test_workspace.id,
             workflow_id=mock_workflow.id,
             created_at=datetime(2024, 1, 1, tzinfo=UTC),
             updated_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
         mock_schedule = Schedule(
-            owner_id=test_workspace.id,
+            id="sch-12345678901234567890123456789012",
+            status="online",
+            workspace_id=test_workspace.id,
             workflow_id=mock_workflow.id,
             cron="0 0 * * *",
             inputs={},

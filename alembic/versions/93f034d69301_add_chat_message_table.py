@@ -9,7 +9,6 @@ Create Date: 2025-09-18 19:02:47.533454
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-import sqlmodel.sql.sqltypes
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
@@ -38,13 +37,18 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("surrogate_id", sa.Integer(), nullable=False),
-        sa.Column("owner_id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
+        sa.Column("owner_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("chat_id", sa.UUID(), nullable=False),
-        sa.Column("kind", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("kind", sa.String(), nullable=False),
         sa.Column("data", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.ForeignKeyConstraint(["chat_id"], ["chat.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("surrogate_id"),
+        sa.ForeignKeyConstraint(
+            ["chat_id"],
+            ["chat.id"],
+            ondelete="CASCADE",
+            name="chat_message_chat_id_fkey",
+        ),
+        sa.PrimaryKeyConstraint("surrogate_id", name="chat_message_pkey"),
     )
     op.create_index(op.f("ix_chat_message_id"), "chat_message", ["id"], unique=True)
     op.drop_constraint("uq_runbook_alias_owner_id", "runbook", type_="unique")

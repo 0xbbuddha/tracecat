@@ -201,7 +201,11 @@ TEMPORAL__DISABLE_EAGER_ACTIVITY_EXECUTION = os.environ.get(
 ).lower() in ("true", "1")
 """Disable eager activity execution for Temporal workflows."""
 
-# Secrets manager config
+# === Sentry config === #
+SENTRY_ENVIRONMENT_OVERRIDE = os.environ.get("SENTRY_ENVIRONMENT_OVERRIDE")
+"""Override the Sentry environment. If not set, defaults to '{app_env}-{temporal_namespace}'."""
+
+# === Secrets manager config === #
 TRACECAT__UNSAFE_DISABLE_SM_MASKING = os.environ.get(
     "TRACECAT__UNSAFE_DISABLE_SM_MASKING",
     "0",  # Default to False
@@ -480,3 +484,25 @@ TRACECAT__AGENT_MAX_REQUESTS = int(os.environ.get("TRACECAT__AGENT_MAX_REQUESTS"
 
 TRACECAT__AGENT_MAX_RETRIES = int(os.environ.get("TRACECAT__AGENT_MAX_RETRIES", 20))
 """The maximum number of retries that can be made per agent run."""
+
+TRACECAT__AGENT_DEFAULT_CONTEXT_LIMIT = int(
+    os.environ.get("TRACECAT__AGENT_DEFAULT_CONTEXT_LIMIT", 128_000)
+)
+"""Default character limit for agent message history when truncating context."""
+
+TRACECAT__AGENT_TOOL_OUTPUT_LIMIT = int(
+    os.environ.get("TRACECAT__AGENT_TOOL_OUTPUT_LIMIT", 80_000)
+)
+"""Default character limit for individual tool outputs when truncating context."""
+
+TRACECAT__MODEL_CONTEXT_LIMITS = {
+    "gpt-4o-mini": 100_000,
+    "gpt-5-mini": 350_000,
+    "gpt-5-nano": 350_000,
+    "gpt-5": 350_000,
+    "claude-sonnet-4-5-20250929": 180_000,
+    "claude-haiku-4-5-20251001": 180_000,
+    "anthropic.claude-sonnet-4-5-20250929-v1:0": 180_000,
+    "anthropic.claude-haiku-4-5-20251001-v1:0": 180_000,
+}
+"""Model-specific character limits for agent message history truncation."""

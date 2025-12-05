@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import sqlalchemy as sa
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tracecat.auth.types import AccessLevel, Role
 from tracecat.cases.enums import CaseEventType, CasePriority, CaseSeverity, CaseStatus
@@ -21,6 +21,7 @@ from tracecat.cases.schemas import (
     UpdatedEvent,
 )
 from tracecat.cases.service import CaseEventsService, CasesService
+from tracecat.db.models import CaseEvent
 from tracecat.exceptions import TracecatAuthorizationError
 
 pytestmark = pytest.mark.usefixtures("db")
@@ -85,7 +86,7 @@ class TestCaseEventsService:
         assert created_event.case_id == test_case.id
         assert created_event.type == CaseEventType.CASE_CREATED
         assert created_event.user_id == case_events_service.role.user_id
-        assert created_event.owner_id == case_events_service.workspace_id
+        assert created_event.workspace_id == case_events_service.workspace_id
         assert created_event.data is not None
 
     async def test_create_status_changed_event(
@@ -496,10 +497,9 @@ class TestCaseEventsService:
         await case_events_service.session.commit()
 
         # Move the first event outside the dedupe window.
-        conn = await case_events_service.session.connection()
-        await conn.execute(
-            sa.update(sa.table("case_event"))
-            .where(sa.column("id") == first_event.id)
+        await case_events_service.session.execute(
+            sa.update(CaseEvent)
+            .where(CaseEvent.id == first_event.id)
             .values(created_at=datetime.now(UTC) - timedelta(minutes=10))
         )
         await case_events_service.session.commit()

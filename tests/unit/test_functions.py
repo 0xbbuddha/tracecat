@@ -255,6 +255,15 @@ def test_to_datetime_invalid_date_string(input: str) -> None:
     [
         (r"\d+", "abc123def", "123"),
         (r"[a-z]+", "ABC123def", "def"),
+        (
+            r"eventId=(\d+)",
+            (
+                "https://example.com/regions/eu-west-1/organizations/"
+                "1111111111/deployments/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"
+                "deployment?eventId=19759328"
+            ),
+            "19759328",
+        ),
         (r"test", "no match", None),
     ],
 )
@@ -569,15 +578,15 @@ def test_mappable_decorator() -> None:
     assert result == 5
 
     # Test mapped function call with scalars
-    result = mapped_add.map(2, 3)
+    result = mapped_add.map(2, 3)  # type: ignore[attr-defined]
     assert result == [5]
 
     # Test mapped function call with sequences
-    result = mapped_add.map([1, 2, 3], [4, 5, 6])
+    result = mapped_add.map([1, 2, 3], [4, 5, 6])  # type: ignore[attr-defined]
     assert result == [5, 7, 9]
 
     # Test mapped function with mixed scalar and sequence
-    result = mapped_add.map([1, 2, 3], 1)
+    result = mapped_add.map([1, 2, 3], 1)  # type: ignore[attr-defined]
     assert result == [2, 3, 4]
 
 

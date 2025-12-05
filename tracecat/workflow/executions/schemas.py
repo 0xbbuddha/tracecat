@@ -230,7 +230,7 @@ class EventGroup[T: EventInput](BaseModel):
             raise ValueError("Event is not a child workflow initiated event.")
 
         attrs = event.start_child_workflow_execution_initiated_event_attributes
-        logger.warning("Child workflow initiated event", attrs=attrs.workflow_type)
+        logger.debug("Child workflow initiated event", attrs=attrs.workflow_type)
         match attrs.workflow_type.name:
             case "DSLWorkflow":
                 wf_exec_id = cast(WorkflowExecutionID, attrs.workflow_id)
@@ -262,12 +262,12 @@ class EventGroup[T: EventInput](BaseModel):
                 agent_wf_id = AgentWorkflowID.from_workflow_id(attrs.workflow_id)
                 input = await extract_first(attrs.input)
                 agent_run_args = AgentWorkflowArgs(**input)
-                namespace, name = PlatformAction.AI_APPROVALS_AGENT.value.split(".", 1)
+                namespace, name = PlatformAction.AI_AGENT.value.split(".", 1)
                 return EventGroup(
                     event_id=event.event_id,
                     udf_namespace=namespace,
                     udf_name=name,
-                    udf_key=PlatformAction.AI_APPROVALS_AGENT.value,
+                    udf_key=PlatformAction.AI_AGENT.value,
                     action_id=agent_wf_id,
                     action_ref=None,
                     action_title="AI Agent",
@@ -476,7 +476,7 @@ class WorkflowExecutionEventCompact[TInput: Any, TResult: Any, TSessionEvent: An
                     status = WorkflowExecutionEventStatus.DETACHED
                 else:
                     status = WorkflowExecutionEventStatus.SCHEDULED
-                logger.info(
+                logger.debug(
                     "Child workflow initiated event",
                     status=status,
                     wf_exec_id=wf_exec_id,
@@ -517,7 +517,7 @@ class WorkflowExecutionEventCompact[TInput: Any, TResult: Any, TSessionEvent: An
                     schedule_time=event.event_time.ToDatetime(UTC),
                     curr_event_type=HISTORY_TO_WF_EVENT_TYPE[event.event_type],
                     status=WorkflowExecutionEventStatus.SCHEDULED,
-                    action_name=PlatformAction.AI_APPROVALS_AGENT.value,
+                    action_name=PlatformAction.AI_AGENT.value,
                     action_ref=memo.action_ref,
                     action_input=agent_run_args,
                     child_wf_exec_id=None,

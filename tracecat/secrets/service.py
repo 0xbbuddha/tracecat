@@ -4,9 +4,9 @@ import os
 from collections.abc import Sequence
 
 from pydantic import SecretStr
+from sqlalchemy import select
 from sqlalchemy.exc import MultipleResultsFound, NoResultFound
-from sqlmodel import col, select
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tracecat import config
 from tracecat.auth.types import Role
@@ -103,27 +103,27 @@ class SecretsService(BaseService):
     ) -> Sequence[Secret]:
         """List all workspace secrets."""
 
-        statement = select(Secret).where(Secret.owner_id == self.role.workspace_id)
+        statement = select(Secret).where(Secret.workspace_id == self.role.workspace_id)
         if types:
-            statement = statement.where(col(Secret.type).in_(types))
-        result = await self.session.exec(statement)
-        return result.all()
+            statement = statement.where(Secret.type.in_(types))
+        result = await self.session.execute(statement)
+        return result.scalars().all()
 
     async def get_secret(self, secret_id: SecretID) -> Secret:
         """Get a workspace secret by ID."""
 
         statement = select(Secret).where(
-            Secret.owner_id == self.role.workspace_id,
+            Secret.workspace_id == self.role.workspace_id,
             Secret.id == secret_id,
         )
-        result = await self.session.exec(statement)
+        result = await self.session.execute(statement)
         try:
-            return result.one()
+            return result.scalar_one()
         except MultipleResultsFound as e:
             logger.error(
                 "Multiple secrets found",
                 secret_id=secret_id,
-                owner_id=self.role.workspace_id,
+                workspace_id=self.role.workspace_id,
             )
             raise TracecatNotFoundError(
                 "Multiple secrets found when searching by ID"
@@ -132,7 +132,7 @@ class SecretsService(BaseService):
             logger.error(
                 "Secret not found",
                 secret_id=secret_id,
-                owner_id=self.role.workspace_id,
+                workspace_id=self.role.workspace_id,
             )
             raise TracecatNotFoundError(
                 "Secret not found when searching by ID. Please check that the ID was correctly input."
@@ -157,14 +157,14 @@ class SecretsService(BaseService):
         """
 
         statement = select(Secret).where(
-            Secret.owner_id == self.role.workspace_id,
+            Secret.workspace_id == self.role.workspace_id,
             Secret.name == secret_name,
         )
         if environment:
             statement = statement.where(Secret.environment == environment)
-        result = await self.session.exec(statement)
+        result = await self.session.execute(statement)
         try:
-            return result.one()
+            return result.scalar_one()
         except MultipleResultsFound as e:
             raise TracecatNotFoundError(
                 "Multiple secrets found when searching by name."
@@ -178,13 +178,13 @@ class SecretsService(BaseService):
 
     async def create_secret(self, params: SecretCreate) -> None:
         """Create a workspace secret."""
-        owner_id = self.role.workspace_id
-        if owner_id is None:
+        workspace_id = self.role.workspace_id
+        if workspace_id is None:
             raise TracecatAuthorizationError(
                 "Workspace ID is required to create a secret in a workspace"
             )
         secret = Secret(
-            owner_id=owner_id,
+            workspace_id=workspace_id,
             name=params.name,
             type=params.type,
             description=params.description,
@@ -210,24 +210,24 @@ class SecretsService(BaseService):
         if not any((params.ids, params.names, params.environment)):
             return []
 
-        owner_id = self.role.workspace_id
-        if owner_id is None:
+        workspace_id = self.role.workspace_id
+        if workspace_id is None:
             raise TracecatAuthorizationError(
                 "Workspace ID is required to search secrets"
             )
-        stmt = select(Secret).where(Secret.owner_id == owner_id)
+        stmt = select(Secret).where(Secret.workspace_id == workspace_id)
         fields = params.model_dump(exclude_unset=True)
         self.logger.info("Searching secrets", set_fields=fields)
 
         if ids := fields.get("ids"):
-            stmt = stmt.where(col(Secret.id).in_(ids))
+            stmt = stmt.where(Secret.id.in_(ids))
         if names := fields.get("names"):
-            stmt = stmt.where(col(Secret.name).in_(names))
+            stmt = stmt.where(Secret.name.in_(names))
         if "environment" in fields:
             stmt = stmt.where(Secret.environment == fields["environment"])
 
-        result = await self.session.exec(stmt)
-        return result.all()
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
 
     # === Organization secrets ===
 
@@ -237,22 +237,22 @@ class SecretsService(BaseService):
         """List all organization secrets."""
 
         stmt = select(OrganizationSecret).where(
-            OrganizationSecret.owner_id == config.TRACECAT__DEFAULT_ORG_ID
+            OrganizationSecret.organization_id == config.TRACECAT__DEFAULT_ORG_ID
         )
         if types:
-            stmt = stmt.where(col(OrganizationSecret.type).in_(types))
-        result = await self.session.exec(stmt)
-        return result.all()
+            stmt = stmt.where(OrganizationSecret.type.in_(types))
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
 
     async def get_org_secret(self, secret_id: SecretID) -> OrganizationSecret:
         """Get an organization secret by ID."""
 
         statement = select(OrganizationSecret).where(
-            OrganizationSecret.owner_id == config.TRACECAT__DEFAULT_ORG_ID,
+            OrganizationSecret.organization_id == config.TRACECAT__DEFAULT_ORG_ID,
             OrganizationSecret.id == secret_id,
         )
-        result = await self.session.exec(statement)
-        return result.one()
+        result = await self.session.execute(statement)
+        return result.scalar_one()
 
     async def get_org_secret_by_name(
         self,
@@ -262,13 +262,13 @@ class SecretsService(BaseService):
         """Retrieve an organization-wide secret by its name."""
         environment = environment or DEFAULT_SECRETS_ENVIRONMENT
         statement = select(OrganizationSecret).where(
-            OrganizationSecret.owner_id == config.TRACECAT__DEFAULT_ORG_ID,
+            OrganizationSecret.organization_id == config.TRACECAT__DEFAULT_ORG_ID,
             OrganizationSecret.name == secret_name,
             OrganizationSecret.environment == environment,
         )
-        result = await self.session.exec(statement)
+        result = await self.session.execute(statement)
         try:
-            return result.one()
+            return result.scalar_one()
         except MultipleResultsFound as e:
             raise TracecatNotFoundError(
                 "Multiple organization secrets found when searching by name."
@@ -283,7 +283,7 @@ class SecretsService(BaseService):
     async def create_org_secret(self, params: SecretCreate) -> None:
         """Create a new organization secret."""
         secret = OrganizationSecret(
-            owner_id=config.TRACECAT__DEFAULT_ORG_ID,
+            organization_id=config.TRACECAT__DEFAULT_ORG_ID,
             name=params.name,
             type=params.type,
             description=params.description,

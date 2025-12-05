@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Literal, cast
 
+from sqlalchemy import select
 from sqlalchemy.exc import NoResultFound
-from sqlmodel import select
 from temporalio import activity
 
 from tracecat.auth.types import AccessLevel
@@ -47,11 +47,13 @@ class WorkflowSchedulesService(BaseService):
         list[Schedule]
             A list of Schedule objects representing the schedules for the specified workflow, or all schedules if no workflow ID is provided.
         """
-        statement = select(Schedule).where(Schedule.owner_id == self.role.workspace_id)
+        statement = select(Schedule).where(
+            Schedule.workspace_id == self.role.workspace_id
+        )
         if workflow_id is not None:
             statement = statement.where(Schedule.workflow_id == workflow_id)
-        result = await self.session.exec(statement)
-        schedules = result.all()
+        result = await self.session.execute(statement)
+        schedules = result.scalars().all()
         return list(schedules)
 
     async def create_schedule(
@@ -76,11 +78,11 @@ class WorkflowSchedulesService(BaseService):
             If there is an error creating the schedule.
 
         """
-        owner_id = self.role.workspace_id
-        if owner_id is None:
+        workspace_id = self.role.workspace_id
+        if workspace_id is None:
             raise TracecatAuthorizationError("Workspace ID is required")
         schedule = Schedule(
-            owner_id=owner_id,
+            workspace_id=workspace_id,
             workflow_id=WorkflowUUID.new(params.workflow_id),
             inputs=params.inputs or {},
             every=params.every,
@@ -92,6 +94,7 @@ class WorkflowSchedulesService(BaseService):
             status="online",
         )
         self.session.add(schedule)
+        await self.session.flush()
 
         role = self.role.model_copy(
             update={
@@ -167,14 +170,14 @@ class WorkflowSchedulesService(BaseService):
             If the schedule is not found
 
         """
-        result = await self.session.exec(
+        result = await self.session.execute(
             select(Schedule).where(
-                Schedule.owner_id == self.role.workspace_id,
+                Schedule.workspace_id == self.role.workspace_id,
                 Schedule.id == schedule_id,
             )
         )
         try:
-            return result.one()
+            return result.scalar_one()
         except NoResultFound as e:
             raise TracecatNotFoundError(f"Schedule {schedule_id} not found") from e
 
@@ -306,7 +309,7 @@ class WorkflowSchedulesService(BaseService):
                 schedule = await service.get_schedule(input.schedule_id)
                 return ScheduleRead(
                     id=schedule.id,
-                    owner_id=schedule.owner_id,
+                    workspace_id=schedule.workspace_id,
                     created_at=schedule.created_at,
                     updated_at=schedule.updated_at,
                     workflow_id=WorkflowUUID.new(schedule.workflow_id),

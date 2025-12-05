@@ -6,8 +6,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from authlib.integrations.httpx_client import AsyncOAuth2Client
+from authlib.oauth2.rfc7636 import create_s256_code_challenge
 from pydantic import BaseModel, SecretStr, ValidationError
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tracecat.auth.types import Role
 from tracecat.db.models import OAuthIntegration
@@ -44,11 +45,11 @@ class MockOAuthProvider(AuthorizationCodeOAuthProvider):
     """Mock OAuth provider for testing."""
 
     id: ClassVar[str] = "mock_provider"
-    default_authorization_endpoint: ClassVar[str] = (
+    default_authorization_endpoint: ClassVar[str] = (  # type: ignore[assignment]
         "https://mock.provider/oauth/authorize"
     )
-    default_token_endpoint: ClassVar[str] = "https://mock.provider/oauth/token"
-    config_model: ClassVar[type[BaseModel]] = MockProviderConfig
+    default_token_endpoint: ClassVar[str] = "https://mock.provider/oauth/token"  # type: ignore[assignment]
+    config_model: ClassVar[type[BaseModel]] = MockProviderConfig  # type: ignore[assignment]
     scopes: ClassVar[ProviderScopes] = ProviderScopes(
         default=["read", "write"],
     )
@@ -88,11 +89,11 @@ class MockCCOAuthProvider(ClientCredentialsOAuthProvider):
     """Mock OAuth provider for client credentials testing."""
 
     id: ClassVar[str] = "mock_cc_provider"
-    default_authorization_endpoint: ClassVar[str] = (
+    default_authorization_endpoint: ClassVar[str] = (  # type: ignore[assignment]
         "https://mock.provider/oauth/authorize"
     )
-    default_token_endpoint: ClassVar[str] = "https://mock.provider/oauth/token"
-    config_model: ClassVar[type[BaseModel]] = MockProviderConfig
+    default_token_endpoint: ClassVar[str] = "https://mock.provider/oauth/token"  # type: ignore[assignment]
+    config_model: ClassVar[type[BaseModel]] = MockProviderConfig  # type: ignore[assignment]
     scopes: ClassVar[ProviderScopes] = ProviderScopes(
         default=["read", "write"],
     )
@@ -140,6 +141,17 @@ def mock_provider(monkeypatch: pytest.MonkeyPatch) -> MockOAuthProvider:
     # Set required environment variable
     monkeypatch.setenv("TRACECAT__PUBLIC_APP_URL", "http://localhost:8000")
     return MockOAuthProvider(
+        client_id="mock_client_id", client_secret="mock_client_secret"
+    )
+
+
+@pytest.fixture
+def mock_pkce_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> MockOAuthProviderWithPKCE:
+    """Create a mock OAuth provider instance with PKCE enabled."""
+    monkeypatch.setenv("TRACECAT__PUBLIC_APP_URL", "http://localhost:8000")
+    return MockOAuthProviderWithPKCE(
         client_id="mock_client_id", client_secret="mock_client_secret"
     )
 
@@ -326,7 +338,7 @@ class TestIntegrationService:
 
         # Verify workspace-level integration
         assert workspace_integration.user_id is None
-        assert workspace_integration.owner_id == integration_service.workspace_id
+        assert workspace_integration.workspace_id == integration_service.workspace_id
 
         # Note: Testing actual user_id insertion requires foreign key setup with user table,
         # but the method signature and parameter handling is covered
@@ -1112,7 +1124,7 @@ class TestIntegrationService:
         )
 
         insecure_integration = OAuthIntegration(
-            owner_id=integration_service.workspace_id,
+            workspace_id=integration_service.workspace_id,
             provider_id=provider_key.id,
             grant_type=provider_key.grant_type,
             user_id=None,
@@ -1152,10 +1164,21 @@ class TestIntegrationService:
     ) -> None:
         """Ensure request schema rejects insecure OAuth endpoints."""
         with pytest.raises(ValidationError):
-            IntegrationUpdate(
-                grant_type=OAuthGrantType.AUTHORIZATION_CODE,
-                **{field: value},
-            )
+            # Explicitly construct kwargs to avoid type checker issues with **{field: value}
+            # when client_secret expects SecretStr | None
+            match field:
+                case "authorization_endpoint":
+                    IntegrationUpdate(
+                        grant_type=OAuthGrantType.AUTHORIZATION_CODE,
+                        authorization_endpoint=value,
+                    )
+                case "token_endpoint":
+                    IntegrationUpdate(
+                        grant_type=OAuthGrantType.AUTHORIZATION_CODE,
+                        token_endpoint=value,
+                    )
+                case _:
+                    raise ValueError(f"Unexpected field: {field}")
 
     async def test_store_provider_config_includes_default_endpoints(
         self,
@@ -1465,13 +1488,51 @@ class TestBaseOAuthProvider:
                 state,
             )
 
-            url = await mock_provider.get_authorization_url(state)
+            url, code_verifier = await mock_provider.get_authorization_url(state)
 
             assert "mock.provider/oauth/authorize" in url
             assert state in url
+            assert code_verifier is None
             mock_create_url.assert_called_once_with(
                 mock_provider.authorization_endpoint,
                 state=state,
+            )
+
+    async def test_get_authorization_url_with_pkce(
+        self, mock_pkce_provider: MockOAuthProviderWithPKCE
+    ) -> None:
+        """Test generating authorization URL when PKCE is enabled."""
+        state = "test_state_pkce"
+        code_verifier = "pkce_verifier_value_1234567890"
+        expected_challenge = create_s256_code_challenge(code_verifier)
+
+        with (
+            patch(
+                "tracecat.integrations.providers.base.secrets.token_urlsafe",
+                return_value=code_verifier,
+            ),
+            patch.object(
+                AsyncOAuth2Client, "create_authorization_url"
+            ) as mock_create_url,
+        ):
+            mock_create_url.return_value = (
+                "https://mock.provider/oauth/authorize?client_id=mock_client_id&state=test_state_pkce",
+                state,
+            )
+
+            url, returned_verifier = await mock_pkce_provider.get_authorization_url(
+                state
+            )
+
+            assert "mock.provider/oauth/authorize" in url
+            assert returned_verifier == code_verifier
+            mock_create_url.assert_called_once_with(
+                mock_pkce_provider.authorization_endpoint,
+                state=state,
+                custom_auth_param="auth_value",
+                audience="test-api",
+                code_challenge=expected_challenge,
+                code_challenge_method="S256",
             )
 
     async def test_exchange_code_for_token(

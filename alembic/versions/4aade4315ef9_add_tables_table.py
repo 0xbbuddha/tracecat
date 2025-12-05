@@ -9,7 +9,6 @@ Create Date: 2025-02-19 15:44:24.509578
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-import sqlmodel.sql.sqltypes
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
@@ -38,11 +37,11 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("surrogate_id", sa.Integer(), nullable=False),
-        sa.Column("owner_id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
-        sa.Column("name", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-        sa.PrimaryKeyConstraint("surrogate_id"),
-        sa.UniqueConstraint("name", "owner_id"),
+        sa.Column("owner_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("name", sa.String(), nullable=False),
+        sa.PrimaryKeyConstraint("surrogate_id", name="tables_pkey"),
+        sa.UniqueConstraint("name", "owner_id", name="tables_name_owner_id_key"),
     )
     op.create_index(op.f("ix_tables_id"), "tables", ["id"], unique=True)
     op.create_index(op.f("ix_tables_name"), "tables", ["name"], unique=False)
@@ -60,15 +59,20 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("table_id", sa.UUID(), nullable=True),
-        sa.Column("name", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-        sa.Column("type", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("name", sa.String(), nullable=False),
+        sa.Column("type", sa.String(), nullable=False),
         sa.Column("nullable", sa.Boolean(), nullable=False),
         sa.Column("default", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.ForeignKeyConstraint(["table_id"], ["tables.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("table_id", "name"),
+        sa.ForeignKeyConstraint(
+            ["table_id"],
+            ["tables.id"],
+            ondelete="CASCADE",
+            name="table_columns_table_id_fkey",
+        ),
+        sa.PrimaryKeyConstraint("id", name="table_columns_pkey"),
+        sa.UniqueConstraint("table_id", "name", name="table_columns_table_id_name_key"),
     )
     op.create_index(op.f("ix_table_columns_id"), "table_columns", ["id"], unique=True)
     op.create_index(

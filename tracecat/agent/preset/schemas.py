@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from tracecat.agent.types import AgentConfig, OutputType
-from tracecat.identifiers import OwnerID
+from tracecat.core.schemas import Schema
+from tracecat.identifiers import WorkspaceID
 
 
-class AgentPresetBase(BaseModel):
+class AgentPresetBase(Schema):
     """Shared fields for agent preset mutations."""
 
     description: str | None = Field(default=None, max_length=1000)
@@ -24,9 +24,7 @@ class AgentPresetBase(BaseModel):
     actions: list[str] | None = Field(default=None)
     namespaces: list[str] | None = Field(default=None)
     tool_approvals: dict[str, bool] | None = Field(default=None)
-    mcp_server_url: str | None = Field(default=None, max_length=500)
-    mcp_server_headers: dict[str, str] | None = Field(default=None)
-    model_settings: dict[str, Any] | None = Field(default=None)
+    mcp_integrations: list[str] | None = Field(default=None)
     retries: int = Field(default=3, ge=0)
 
 
@@ -51,31 +49,27 @@ class AgentPresetUpdate(BaseModel):
     actions: list[str] | None = Field(default=None)
     namespaces: list[str] | None = Field(default=None)
     tool_approvals: dict[str, bool] | None = Field(default=None)
-    mcp_server_url: str | None = Field(default=None, max_length=500)
-    mcp_server_headers: dict[str, str] | None = Field(default=None)
-    model_settings: dict[str, Any] | None = Field(default=None)
+    mcp_integrations: list[str] | None = Field(default=None)
     retries: int | None = Field(default=None, ge=0)
 
 
-class AgentPresetReadMinimal(BaseModel):
+class AgentPresetReadMinimal(Schema):
     """Minimal API model for reading agent presets in list endpoints."""
 
     id: uuid.UUID
-    owner_id: OwnerID
+    workspace_id: WorkspaceID
     name: str
     slug: str
     description: str | None
     created_at: datetime
     updated_at: datetime
 
-    model_config = ConfigDict(from_attributes=True)
-
 
 class AgentPresetRead(AgentPresetBase):
     """API model for reading agent presets."""
 
     id: uuid.UUID
-    owner_id: OwnerID
+    workspace_id: WorkspaceID
     name: str
     slug: str
     created_at: datetime
@@ -95,9 +89,6 @@ class AgentPresetRead(AgentPresetBase):
             actions=self.actions,
             namespaces=self.namespaces,
             tool_approvals=self.tool_approvals,
-            mcp_server_url=self.mcp_server_url,
-            mcp_server_headers=self.mcp_server_headers,
-            model_settings=self.model_settings,
             retries=self.retries,
         )
 

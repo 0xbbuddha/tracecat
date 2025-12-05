@@ -22,6 +22,8 @@ import type {
   AgentGetProviderCredentialConfigData,
   AgentGetProviderCredentialConfigResponse,
   AgentGetProvidersStatusResponse,
+  AgentGetWorkspaceProvidersStatusData,
+  AgentGetWorkspaceProvidersStatusResponse,
   AgentListAgentSessionsData,
   AgentListAgentSessionsResponse,
   AgentListModelsResponse,
@@ -201,6 +203,16 @@ import type {
   IntegrationsTestConnectionResponse,
   IntegrationsUpdateIntegrationData,
   IntegrationsUpdateIntegrationResponse,
+  McpIntegrationsCreateMcpIntegrationData,
+  McpIntegrationsCreateMcpIntegrationResponse,
+  McpIntegrationsDeleteMcpIntegrationData,
+  McpIntegrationsDeleteMcpIntegrationResponse,
+  McpIntegrationsGetMcpIntegrationData,
+  McpIntegrationsGetMcpIntegrationResponse,
+  McpIntegrationsListMcpIntegrationsData,
+  McpIntegrationsListMcpIntegrationsResponse,
+  McpIntegrationsUpdateMcpIntegrationData,
+  McpIntegrationsUpdateMcpIntegrationResponse,
   OrganizationDeleteOrgMemberData,
   OrganizationDeleteOrgMemberResponse,
   OrganizationDeleteSessionData,
@@ -1137,7 +1149,7 @@ export const workflowsExportWorkflow = (
  * @param data The data for the request.
  * @param data.workflowId
  * @param data.workspaceId
- * @returns WorkflowDefinition Successful Response
+ * @returns WorkflowDefinitionRead Successful Response
  * @throws ApiError
  */
 export const workflowsListWorkflowDefinitions = (
@@ -1165,7 +1177,7 @@ export const workflowsListWorkflowDefinitions = (
  * @param data.workflowId
  * @param data.workspaceId
  * @param data.version
- * @returns WorkflowDefinition Successful Response
+ * @returns WorkflowDefinitionRead Successful Response
  * @throws ApiError
  */
 export const workflowsGetWorkflowDefinition = (
@@ -1193,7 +1205,7 @@ export const workflowsGetWorkflowDefinition = (
  * @param data The data for the request.
  * @param data.workflowId
  * @param data.workspaceId
- * @returns WorkflowDefinition Successful Response
+ * @returns WorkflowDefinitionRead Successful Response
  * @throws ApiError
  */
 export const workflowsCreateWorkflowDefinition = (
@@ -1668,6 +1680,7 @@ export const actionsGetAction = (
  * @param data The data for the request.
  * @param data.actionId
  * @param data.workspaceId
+ * @param data.workflowId
  * @param data.requestBody
  * @returns ActionRead Successful Response
  * @throws ApiError
@@ -1683,6 +1696,7 @@ export const actionsUpdateAction = (
     },
     query: {
       workspace_id: data.workspaceId,
+      workflow_id: data.workflowId,
     },
     body: data.requestBody,
     mediaType: "application/json",
@@ -1698,6 +1712,7 @@ export const actionsUpdateAction = (
  * @param data The data for the request.
  * @param data.actionId
  * @param data.workspaceId
+ * @param data.workflowId
  * @returns void Successful Response
  * @throws ApiError
  */
@@ -1712,6 +1727,7 @@ export const actionsDeleteAction = (
     },
     query: {
       workspace_id: data.workspaceId,
+      workflow_id: data.workflowId,
     },
     errors: {
       422: "Validation Error",
@@ -2224,7 +2240,7 @@ export const variablesDeleteVariableById = (
  * @param data The data for the request.
  * @param data.workspaceId
  * @param data.workflowId
- * @returns Schedule Successful Response
+ * @returns ScheduleRead Successful Response
  * @throws ApiError
  */
 export const schedulesListSchedules = (
@@ -2249,7 +2265,7 @@ export const schedulesListSchedules = (
  * @param data The data for the request.
  * @param data.workspaceId
  * @param data.requestBody
- * @returns Schedule Successful Response
+ * @returns ScheduleRead Successful Response
  * @throws ApiError
  */
 export const schedulesCreateSchedule = (
@@ -2275,7 +2291,7 @@ export const schedulesCreateSchedule = (
  * @param data The data for the request.
  * @param data.scheduleId
  * @param data.workspaceId
- * @returns Schedule Successful Response
+ * @returns ScheduleRead Successful Response
  * @throws ApiError
  */
 export const schedulesGetSchedule = (
@@ -2303,7 +2319,7 @@ export const schedulesGetSchedule = (
  * @param data.scheduleId
  * @param data.workspaceId
  * @param data.requestBody
- * @returns Schedule Successful Response
+ * @returns ScheduleRead Successful Response
  * @throws ApiError
  */
 export const schedulesUpdateSchedule = (
@@ -2359,7 +2375,7 @@ export const schedulesDeleteSchedule = (
  * @param data The data for the request.
  * @param data.workspaceId
  * @param data.requestBody
- * @returns Schedule Successful Response
+ * @returns ScheduleRead Successful Response
  * @throws ApiError
  */
 export const schedulesSearchSchedules = (
@@ -2812,6 +2828,29 @@ export const agentSetDefaultModel = (
     url: "/agent/default-model",
     query: {
       model_name: data.modelName,
+    },
+    errors: {
+      422: "Validation Error",
+    },
+  })
+}
+
+/**
+ * Get Workspace Providers Status
+ * Get workspace credential status for all providers.
+ * @param data The data for the request.
+ * @param data.workspaceId
+ * @returns boolean Successful Response
+ * @throws ApiError
+ */
+export const agentGetWorkspaceProvidersStatus = (
+  data: AgentGetWorkspaceProvidersStatusData
+): CancelablePromise<AgentGetWorkspaceProvidersStatusResponse> => {
+  return __request(OpenAPI, {
+    method: "GET",
+    url: "/agent/workspace/providers/status",
+    query: {
+      workspace_id: data.workspaceId,
     },
     errors: {
       422: "Validation Error",
@@ -3708,7 +3747,7 @@ export const organizationSecretsCreateOrgSecret = (
  * @param data The data for the request.
  * @param data.secretName
  * @param data.environment
- * @returns SecretRead Successful Response
+ * @returns OrganizationSecretRead Successful Response
  * @throws ApiError
  */
 export const organizationSecretsGetOrgSecretByName = (
@@ -4004,13 +4043,15 @@ export const tablesDeleteColumn = (
 
 /**
  * List Rows
- * Get a row by ID.
+ * List table rows with cursor-based pagination and sorting.
  * @param data The data for the request.
  * @param data.tableId
  * @param data.workspaceId
  * @param data.limit
  * @param data.cursor
  * @param data.reverse
+ * @param data.orderBy Column name to order by
+ * @param data.sort Sort direction (asc or desc)
  * @returns CursorPaginatedResponse_TableRowRead_ Successful Response
  * @throws ApiError
  */
@@ -4027,6 +4068,8 @@ export const tablesListRows = (
       limit: data.limit,
       cursor: data.cursor,
       reverse: data.reverse,
+      order_by: data.orderBy,
+      sort: data.sort,
       workspace_id: data.workspaceId,
     },
     errors: {
@@ -4214,7 +4257,7 @@ export const tablesImportCsv = (
 
 /**
  * List Cases
- * List cases with cursor-based pagination and filtering.
+ * List cases with cursor-based pagination, filtering, and sorting.
  * @param data The data for the request.
  * @param data.workspaceId
  * @param data.limit Maximum items per page
@@ -4226,6 +4269,8 @@ export const tablesImportCsv = (
  * @param data.severity Filter by case severity
  * @param data.assigneeId Filter by assignee ID or 'unassigned'
  * @param data.tags Filter by tag IDs or slugs (AND logic)
+ * @param data.orderBy Column name to order by (e.g. created_at, updated_at, priority, severity, status, tasks). Default: created_at
+ * @param data.sort Direction to sort (asc or desc)
  * @returns CursorPaginatedResponse_CaseReadMinimal_ Successful Response
  * @throws ApiError
  */
@@ -4245,6 +4290,8 @@ export const casesListCases = (
       severity: data.severity,
       assignee_id: data.assigneeId,
       tags: data.tags,
+      order_by: data.orderBy,
+      sort: data.sort,
       workspace_id: data.workspaceId,
     },
     errors: {
@@ -4290,7 +4337,7 @@ export const casesCreateCase = (
  * @param data.severity Filter by case severity
  * @param data.tags Filter by tag IDs or slugs (AND logic)
  * @param data.limit Maximum number of cases to return
- * @param data.orderBy Field to order the cases by
+ * @param data.orderBy Column name to order by (e.g. created_at, updated_at, priority, severity, status). Default: created_at
  * @param data.sort Direction to sort (asc or desc)
  * @param data.startTime Return cases created at or after this timestamp
  * @param data.endTime Return cases created at or before this timestamp
@@ -4678,7 +4725,7 @@ export const casesDeleteTask = (
  * List all case fields.
  * @param data The data for the request.
  * @param data.workspaceId
- * @returns CaseFieldRead Successful Response
+ * @returns CaseFieldReadMinimal Successful Response
  * @throws ApiError
  */
 export const casesListFields = (
@@ -6097,6 +6144,139 @@ export const providersGetProvider = (
     query: {
       workspace_id: data.workspaceId,
       grant_type: data.grantType,
+    },
+    errors: {
+      422: "Validation Error",
+    },
+  })
+}
+
+/**
+ * Create Mcp Integration
+ * Create a new MCP integration.
+ * @param data The data for the request.
+ * @param data.workspaceId
+ * @param data.requestBody
+ * @returns MCPIntegrationRead Successful Response
+ * @throws ApiError
+ */
+export const mcpIntegrationsCreateMcpIntegration = (
+  data: McpIntegrationsCreateMcpIntegrationData
+): CancelablePromise<McpIntegrationsCreateMcpIntegrationResponse> => {
+  return __request(OpenAPI, {
+    method: "POST",
+    url: "/mcp-integrations",
+    query: {
+      workspace_id: data.workspaceId,
+    },
+    body: data.requestBody,
+    mediaType: "application/json",
+    errors: {
+      422: "Validation Error",
+    },
+  })
+}
+
+/**
+ * List Mcp Integrations
+ * List all MCP integrations for the workspace.
+ * @param data The data for the request.
+ * @param data.workspaceId
+ * @returns MCPIntegrationRead Successful Response
+ * @throws ApiError
+ */
+export const mcpIntegrationsListMcpIntegrations = (
+  data: McpIntegrationsListMcpIntegrationsData
+): CancelablePromise<McpIntegrationsListMcpIntegrationsResponse> => {
+  return __request(OpenAPI, {
+    method: "GET",
+    url: "/mcp-integrations",
+    query: {
+      workspace_id: data.workspaceId,
+    },
+    errors: {
+      422: "Validation Error",
+    },
+  })
+}
+
+/**
+ * Get Mcp Integration
+ * Get an MCP integration by ID.
+ * @param data The data for the request.
+ * @param data.mcpIntegrationId
+ * @param data.workspaceId
+ * @returns MCPIntegrationRead Successful Response
+ * @throws ApiError
+ */
+export const mcpIntegrationsGetMcpIntegration = (
+  data: McpIntegrationsGetMcpIntegrationData
+): CancelablePromise<McpIntegrationsGetMcpIntegrationResponse> => {
+  return __request(OpenAPI, {
+    method: "GET",
+    url: "/mcp-integrations/{mcp_integration_id}",
+    path: {
+      mcp_integration_id: data.mcpIntegrationId,
+    },
+    query: {
+      workspace_id: data.workspaceId,
+    },
+    errors: {
+      422: "Validation Error",
+    },
+  })
+}
+
+/**
+ * Update Mcp Integration
+ * Update an MCP integration.
+ * @param data The data for the request.
+ * @param data.mcpIntegrationId
+ * @param data.workspaceId
+ * @param data.requestBody
+ * @returns MCPIntegrationRead Successful Response
+ * @throws ApiError
+ */
+export const mcpIntegrationsUpdateMcpIntegration = (
+  data: McpIntegrationsUpdateMcpIntegrationData
+): CancelablePromise<McpIntegrationsUpdateMcpIntegrationResponse> => {
+  return __request(OpenAPI, {
+    method: "PUT",
+    url: "/mcp-integrations/{mcp_integration_id}",
+    path: {
+      mcp_integration_id: data.mcpIntegrationId,
+    },
+    query: {
+      workspace_id: data.workspaceId,
+    },
+    body: data.requestBody,
+    mediaType: "application/json",
+    errors: {
+      422: "Validation Error",
+    },
+  })
+}
+
+/**
+ * Delete Mcp Integration
+ * Delete an MCP integration.
+ * @param data The data for the request.
+ * @param data.mcpIntegrationId
+ * @param data.workspaceId
+ * @returns void Successful Response
+ * @throws ApiError
+ */
+export const mcpIntegrationsDeleteMcpIntegration = (
+  data: McpIntegrationsDeleteMcpIntegrationData
+): CancelablePromise<McpIntegrationsDeleteMcpIntegrationResponse> => {
+  return __request(OpenAPI, {
+    method: "DELETE",
+    url: "/mcp-integrations/{mcp_integration_id}",
+    path: {
+      mcp_integration_id: data.mcpIntegrationId,
+    },
+    query: {
+      workspace_id: data.workspaceId,
     },
     errors: {
       422: "Validation Error",

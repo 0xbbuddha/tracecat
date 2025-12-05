@@ -34,7 +34,6 @@ with workflow.unsafe.imports_passed_through():
     )
     from tracecat.dsl.workflow import DSLWorkflow
     from tracecat.ee.interactions.service import InteractionService
-    from tracecat.feature_flags import FeatureFlag, is_feature_enabled
     from tracecat.logger import logger
     from tracecat.workflow.management.definitions import (
         get_workflow_definition_activity,
@@ -79,12 +78,11 @@ def get_activities() -> list[Callable]:
         *WorkflowsManagementService.get_activities(),
         *InteractionService.get_activities(),
     ]
-    if is_feature_enabled(FeatureFlag.AGENT_APPROVALS):
-        tool_executor = SimpleToolExecutor()
-        agent_activities = AgentActivities(tool_executor=tool_executor)
-        activities.extend(agent_activities.get_activities())
-        activities.extend(ApprovalManager.get_activities())
-        activities.append(resolve_agent_preset_config_activity)
+    tool_executor = SimpleToolExecutor()
+    agent_activities = AgentActivities(tool_executor=tool_executor)
+    activities.extend(agent_activities.get_activities())
+    activities.extend(ApprovalManager.get_activities())
+    activities.append(resolve_agent_preset_config_activity)
     return activities
 
 
@@ -96,7 +94,9 @@ async def main() -> None:
         logger.info("Initializing Sentry interceptor")
         app_env = config.TRACECAT__APP_ENV
         temporal_namespace = config.TEMPORAL__CLUSTER_NAMESPACE
-        sentry_environment = f"{app_env}-{temporal_namespace}"
+        sentry_environment: str = (
+            config.SENTRY_ENVIRONMENT_OVERRIDE or f"{app_env}-{temporal_namespace}"
+        )
         sentry_sdk.init(
             dsn=sentry_dsn,
             environment=sentry_environment,
@@ -123,9 +123,7 @@ async def main() -> None:
     )
 
     with ThreadPoolExecutor(max_workers=threadpool_max_workers) as executor:
-        workflows: list[type] = [DSLWorkflow]
-        if is_feature_enabled(FeatureFlag.AGENT_APPROVALS):
-            workflows.append(DurableAgentWorkflow)
+        workflows: list[type] = [DSLWorkflow, DurableAgentWorkflow]
 
         async with Worker(
             client,

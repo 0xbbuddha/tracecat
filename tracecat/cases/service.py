@@ -5,10 +5,13 @@ from typing import Any, Literal
 
 import sqlalchemy as sa
 from asyncpg import UndefinedColumnError
+from pydantic import ValidationError
+from sqlalchemy import and_, cast, func, or_, select
+from sqlalchemy.dialects.postgresql import UUID, insert
 from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
-from sqlmodel import and_, cast, col, desc, func, or_, select
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from tracecat.auth.schemas import UserRead
 from tracecat.auth.types import Role
@@ -27,8 +30,6 @@ from tracecat.cases.schemas import (
     CaseCommentUpdate,
     CaseCreate,
     CaseEventVariant,
-    CaseFieldCreate,
-    CaseFieldUpdate,
     CaseReadMinimal,
     CaseTaskCreate,
     CaseTaskUpdate,
@@ -54,6 +55,8 @@ from tracecat.cases.schemas import (
 from tracecat.cases.tags.schemas import CaseTagRead
 from tracecat.cases.tags.service import CaseTagsService
 from tracecat.contexts import ctx_run
+from tracecat.custom_fields import CustomFieldsService
+from tracecat.custom_fields.schemas import CustomFieldCreate
 from tracecat.db.models import (
     Case,
     CaseComment,
@@ -62,11 +65,17 @@ from tracecat.db.models import (
     CaseTagLink,
     CaseTask,
     User,
+    Workflow,
 )
 from tracecat.exceptions import (
     TracecatAuthorizationError,
     TracecatException,
     TracecatNotFoundError,
+    TracecatValidationError,
+)
+from tracecat.expressions.expectations import (
+    ExpectedField,
+    create_expectation_model,
 )
 from tracecat.identifiers.workflow import WorkflowUUID
 from tracecat.pagination import (
@@ -75,7 +84,9 @@ from tracecat.pagination import (
     CursorPaginationParams,
 )
 from tracecat.service import BaseWorkspaceService
-from tracecat.tables.service import TableEditorService, TablesService
+from tracecat.tables.common import normalize_column_options
+from tracecat.tables.enums import SqlType
+from tracecat.tables.service import TablesService
 
 
 def _normalize_filter_values(values: Any) -> list[Any]:
@@ -121,17 +132,15 @@ class CasesService(BaseWorkspaceService):
                 CaseTask.case_id,
                 func.count().label("total"),
                 func.sum(
-                    sa.case(
-                        (col(CaseTask.status) == CaseTaskStatus.COMPLETED, 1), else_=0
-                    )
+                    sa.case((CaseTask.status == CaseTaskStatus.COMPLETED, 1), else_=0)
                 ).label("completed"),
             )
-            .where(col(CaseTask.case_id).in_(case_ids))
-            .group_by(col(CaseTask.case_id))
+            .where(CaseTask.case_id.in_(case_ids))
+            .group_by(CaseTask.case_id)
         )
 
-        result = await self.session.exec(stmt)
-        rows = result.all()
+        result = await self.session.execute(stmt)
+        rows = result.tuples().all()
 
         # Build result dict with defaults for cases without tasks
         counts = {case_id: {"completed": 0, "total": 0} for case_id in case_ids}
@@ -150,7 +159,7 @@ class CasesService(BaseWorkspaceService):
         | None = None,
         sort: Literal["asc", "desc"] | None = None,
     ) -> Sequence[Case]:
-        statement = select(Case).where(Case.owner_id == self.workspace_id)
+        statement = select(Case).where(Case.workspace_id == self.workspace_id)
         if limit is not None:
             statement = statement.limit(limit)
         if order_by is not None:
@@ -161,8 +170,8 @@ class CasesService(BaseWorkspaceService):
                 statement = statement.order_by(attr.desc())
             else:
                 statement = statement.order_by(attr)
-        result = await self.session.exec(statement)
-        return result.all()
+        result = await self.session.execute(statement)
+        return result.scalars().all()
 
     async def list_cases_paginated(
         self,
@@ -174,17 +183,21 @@ class CasesService(BaseWorkspaceService):
         assignee_ids: Sequence[uuid.UUID] | None = None,
         include_unassigned: bool = False,
         tag_ids: list[uuid.UUID] | None = None,
+        order_by: Literal[
+            "created_at", "updated_at", "priority", "severity", "status", "tasks"
+        ]
+        | None = None,
+        sort: Literal["asc", "desc"] | None = None,
     ) -> CursorPaginatedResponse[CaseReadMinimal]:
         """List cases with cursor-based pagination and filtering."""
         paginator = BaseCursorPaginator(self.session)
-        filters: list[Any] = [col(Case.owner_id) == self.workspace_id]
+        filters: list[Any] = [Case.workspace_id == self.workspace_id]
 
         # Base query - eagerly load tags and assignee
         stmt = (
             select(Case)
-            .options(selectinload(Case.tags))  # type: ignore
-            .options(selectinload(Case.assignee))  # type: ignore
-            .order_by(col(Case.created_at).desc(), col(Case.id).desc())
+            .options(selectinload(Case.tags))
+            .options(selectinload(Case.assignee))
         )
 
         # Apply search term filter
@@ -199,24 +212,24 @@ class CasesService(BaseWorkspaceService):
             search_pattern = func.concat("%", search_term, "%")
             filters.append(
                 or_(
-                    col(Case.summary).ilike(search_pattern),
-                    col(Case.description).ilike(search_pattern),
+                    Case.summary.ilike(search_pattern),
+                    Case.description.ilike(search_pattern),
                 )
             )
 
         normalized_statuses = _normalize_filter_values(status)
         if normalized_statuses:
-            filters.append(col(Case.status).in_(normalized_statuses))
+            filters.append(Case.status.in_(normalized_statuses))
 
         # Apply priority filter
         normalized_priorities = _normalize_filter_values(priority)
         if normalized_priorities:
-            filters.append(col(Case.priority).in_(normalized_priorities))
+            filters.append(Case.priority.in_(normalized_priorities))
 
         # Apply severity filter
         normalized_severities = _normalize_filter_values(severity)
         if normalized_severities:
-            filters.append(col(Case.severity).in_(normalized_severities))
+            filters.append(Case.severity.in_(normalized_severities))
 
         # Apply assignee filter
         if include_unassigned or assignee_ids:
@@ -224,10 +237,10 @@ class CasesService(BaseWorkspaceService):
             assignee_conditions: list[Any] = []
 
             if unique_assignees:
-                assignee_conditions.append(col(Case.assignee_id).in_(unique_assignees))
+                assignee_conditions.append(Case.assignee_id.in_(unique_assignees))
 
             if include_unassigned:
-                assignee_conditions.append(col(Case.assignee_id).is_(None))
+                assignee_conditions.append(Case.assignee_id.is_(None))
 
             if assignee_conditions:
                 assignee_clause = (
@@ -241,7 +254,7 @@ class CasesService(BaseWorkspaceService):
         if tag_ids:
             for tag_id in tag_ids:
                 filters.append(
-                    col(Case.id).in_(
+                    Case.id.in_(
                         select(CaseTagLink.case_id).where(CaseTagLink.tag_id == tag_id)
                     )
                 )
@@ -257,65 +270,165 @@ class CasesService(BaseWorkspaceService):
         total_count = await self.session.scalar(count_stmt)
         total_estimate = int(total_count or 0)
 
-        # Apply cursor filtering
+        # Determine sort column and direction
+        sort_column = order_by or "created_at"
+        sort_direction = sort or "desc"
+
+        # Map computed properties to their underlying columns
+        if sort_column == "short_id":
+            sort_column = "case_number"
+
+        # Validate and get sort attribute
+        # For "tasks", use a correlated subquery to count tasks; otherwise use Case column
+        if sort_column == "tasks":
+            task_count_expr = func.coalesce(
+                select(func.count())
+                .where(CaseTask.case_id == Case.id)
+                .correlate(Case)
+                .scalar_subquery(),
+                0,
+            )
+            sort_attr = task_count_expr
+        else:
+            sort_attr = getattr(Case, sort_column)
+
+        # Apply cursor-based pagination with sort-column-aware filtering
+        # The cursor stores (sort_column, sort_value, created_at, id) for proper pagination
         if params.cursor:
             cursor_data = paginator.decode_cursor(params.cursor)
-            cursor_time = cursor_data.created_at
             cursor_id = uuid.UUID(cursor_data.id)
 
-            if params.reverse:
-                stmt = stmt.where(
-                    or_(
-                        col(Case.created_at) > cursor_time,
-                        and_(
-                            col(Case.created_at) == cursor_time,
-                            col(Case.id) > cursor_id,
-                        ),
-                    )
-                ).order_by(col(Case.created_at).asc(), col(Case.id).asc())
+            # Check if cursor was created with the same sort column (for proper pagination)
+            cursor_sort_value = cursor_data.sort_value
+            cursor_has_sort_value = (
+                cursor_data.sort_column == sort_column and cursor_sort_value is not None
+            )
+
+            if cursor_has_sort_value:
+                # Use sort column value for cursor filtering (proper pagination)
+                # For "tasks" column, we need to compare against the task count subquery
+                if sort_column == "tasks":
+                    sort_filter_col = task_count_expr
+                    sort_cursor_value = cursor_sort_value  # Integer comparison
+                else:
+                    sort_filter_col = getattr(Case, sort_column)
+                    sort_cursor_value = cursor_sort_value
+
+                # Composite filtering: (sort_col, id) matches ORDER BY
+                # Use id as tie-breaker since it's always unique
+                if sort_direction == "asc":
+                    if params.reverse:
+                        # Going backward: get records before cursor in sort order
+                        stmt = stmt.where(
+                            or_(
+                                sort_filter_col < sort_cursor_value,
+                                and_(
+                                    sort_filter_col == sort_cursor_value,
+                                    Case.id < cursor_id,
+                                ),
+                            )
+                        )
+                    else:
+                        # Going forward: get records after cursor in sort order
+                        stmt = stmt.where(
+                            or_(
+                                sort_filter_col > sort_cursor_value,
+                                and_(
+                                    sort_filter_col == sort_cursor_value,
+                                    Case.id > cursor_id,
+                                ),
+                            )
+                        )
+                else:
+                    # Descending order
+                    if params.reverse:
+                        # Going backward: get records after cursor in sort order
+                        stmt = stmt.where(
+                            or_(
+                                sort_filter_col > sort_cursor_value,
+                                and_(
+                                    sort_filter_col == sort_cursor_value,
+                                    Case.id > cursor_id,
+                                ),
+                            )
+                        )
+                    else:
+                        # Going forward: get records before cursor in sort order
+                        stmt = stmt.where(
+                            or_(
+                                sort_filter_col < sort_cursor_value,
+                                and_(
+                                    sort_filter_col == sort_cursor_value,
+                                    Case.id < cursor_id,
+                                ),
+                            )
+                        )
+
+        # Apply sorting: (sort_col, id) for stable pagination
+        # Use id as tie-breaker unless we're already sorting by id
+        if sort_column == "id":
+            # No tie-breaker needed when sorting by id (already unique)
+            if sort_direction == "asc":
+                stmt = stmt.order_by(sort_attr.asc())
             else:
-                stmt = stmt.where(
-                    or_(
-                        col(Case.created_at) < cursor_time,
-                        and_(
-                            col(Case.created_at) == cursor_time,
-                            col(Case.id) < cursor_id,
-                        ),
-                    )
-                )
+                stmt = stmt.order_by(sort_attr.desc())
+        else:
+            # Add id as tie-breaker for non-unique columns
+            if sort_direction == "asc":
+                stmt = stmt.order_by(sort_attr.asc(), Case.id.asc())
+            else:
+                stmt = stmt.order_by(sort_attr.desc(), Case.id.desc())
 
         # Fetch limit + 1 to determine if there are more items
         stmt = stmt.limit(params.limit + 1)
-        result = await self.session.exec(stmt)
-        all_cases = result.all()
+        result = await self.session.execute(stmt)
+        all_cases = result.scalars().all()
 
         # Check if there are more items
         has_more = len(all_cases) > params.limit
         cases = all_cases[: params.limit] if has_more else all_cases
 
-        # Generate cursors
+        # Fetch task counts for all cases in one query (needed for cursor generation if sorting by tasks)
+        task_counts = await self.get_task_counts([case.id for case in cases])
+
+        # Generate cursors with sort column info for proper pagination
         next_cursor = None
         prev_cursor = None
         has_previous = params.cursor is not None
 
         if has_more and cases:
             last_case = cases[-1]
-            next_cursor = paginator.encode_cursor(last_case.created_at, last_case.id)
+            sort_value = (
+                task_counts.get(last_case.id, {}).get("total", 0)
+                if sort_column == "tasks"
+                else getattr(last_case, sort_column, None)
+            )
+            next_cursor = paginator.encode_cursor(
+                last_case.id,
+                sort_column=sort_column,
+                sort_value=sort_value,
+            )
 
         if params.cursor and cases:
             first_case = cases[0]
+            sort_value = (
+                task_counts.get(first_case.id, {}).get("total", 0)
+                if sort_column == "tasks"
+                else getattr(first_case, sort_column, None)
+            )
             # For reverse pagination, swap the cursor meaning
             if params.reverse:
                 next_cursor = paginator.encode_cursor(
-                    first_case.created_at, first_case.id
+                    first_case.id,
+                    sort_column=sort_column,
+                    sort_value=sort_value,
                 )
             else:
                 prev_cursor = paginator.encode_cursor(
-                    first_case.created_at, first_case.id
+                    first_case.id,
+                    sort_column=sort_column,
+                    sort_value=sort_value,
                 )
-
-        # Fetch task counts for all cases in one query
-        task_counts = await self.get_task_counts([case.id for case in cases])
 
         # Convert to CaseReadMinimal objects with tags
         case_items = []
@@ -331,7 +444,7 @@ class CasesService(BaseWorkspaceService):
                     id=case.id,
                     created_at=case.created_at,
                     updated_at=case.updated_at,
-                    short_id=f"CASE-{case.case_number:04d}",
+                    short_id=case.short_id,
                     summary=case.summary,
                     status=case.status,
                     priority=case.priority,
@@ -392,8 +505,8 @@ class CasesService(BaseWorkspaceService):
         """
         statement = (
             select(Case)
-            .where(Case.owner_id == self.workspace_id)
-            .options(selectinload(Case.tags))  # type: ignore
+            .where(Case.workspace_id == self.workspace_id)
+            .options(selectinload(Case.tags))
         )
 
         # Apply search term filter (search in summary and description)
@@ -408,25 +521,23 @@ class CasesService(BaseWorkspaceService):
             search_pattern = func.concat("%", search_term, "%")
             statement = statement.where(
                 or_(
-                    col(Case.summary).ilike(search_pattern),
-                    col(Case.description).ilike(search_pattern),
+                    Case.summary.ilike(search_pattern),
+                    Case.description.ilike(search_pattern),
                 )
             )
 
         # Apply status filter
-        normalized_statuses = _normalize_filter_values(status)
-        if normalized_statuses:
-            statement = statement.where(col(Case.status).in_(normalized_statuses))
+        if normalized_statuses := _normalize_filter_values(status):
+            statement = statement.where(Case.status.in_(normalized_statuses))
 
         # Apply priority filter
-        normalized_priorities = _normalize_filter_values(priority)
-        if normalized_priorities:
-            statement = statement.where(col(Case.priority).in_(normalized_priorities))
+        if normalized_priorities := _normalize_filter_values(priority):
+            statement = statement.where(Case.priority.in_(normalized_priorities))
 
         # Apply severity filter
         normalized_severities = _normalize_filter_values(severity)
         if normalized_severities:
-            statement = statement.where(col(Case.severity).in_(normalized_severities))
+            statement = statement.where(Case.severity.in_(normalized_severities))
 
         # Apply tag filtering if specified (AND logic for multiple tags)
         if tag_ids:
@@ -465,8 +576,8 @@ class CasesService(BaseWorkspaceService):
             else:
                 statement = statement.order_by(attr)
 
-        result = await self.session.exec(statement)
-        return result.all()
+        result = await self.session.execute(statement)
+        return result.scalars().all()
 
     async def get_case(
         self, case_id: uuid.UUID, *, track_view: bool = False
@@ -485,14 +596,14 @@ class CasesService(BaseWorkspaceService):
         statement = (
             select(Case)
             .where(
-                Case.owner_id == self.workspace_id,
+                Case.workspace_id == self.workspace_id,
                 Case.id == case_id,
             )
-            .options(selectinload(Case.tags))  # type: ignore
+            .options(selectinload(Case.tags))
         )
 
-        result = await self.session.exec(statement)
-        case = result.first()
+        result = await self.session.execute(statement)
+        case = result.scalars().first()
 
         if case and track_view:
             try:
@@ -521,9 +632,10 @@ class CasesService(BaseWorkspaceService):
 
     async def create_case(self, params: CaseCreate) -> Case:
         try:
+            now = datetime.now(UTC)
             # Create the base case first
             case = Case(
-                owner_id=self.workspace_id,
+                workspace_id=self.workspace_id,
                 summary=params.summary,
                 description=params.description,
                 priority=params.priority,
@@ -531,6 +643,8 @@ class CasesService(BaseWorkspaceService):
                 status=params.status,
                 assignee_id=params.assignee_id,
                 payload=params.payload,
+                created_at=now,
+                updated_at=now,
             )
 
             self.session.add(case)
@@ -538,7 +652,7 @@ class CasesService(BaseWorkspaceService):
 
             # Always create the fields row to ensure defaults are applied
             # Pass empty dict if no fields provided to trigger default value application
-            await self.fields.create_field_values(case, params.fields or {})
+            await self.fields.upsert_field_values(case, params.fields or {})
 
             run_ctx = ctx_run.get()
             await self.events.create_event(
@@ -627,20 +741,16 @@ class CasesService(BaseWorkspaceService):
         if fields := set_fields.pop("fields", None):
             # If fields was set, we need to update the fields row
             # It must be a dictionary because we validated it in the model
-            # Get existing fields
             if not isinstance(fields, dict):
                 raise ValueError("Fields must be a dict")
 
-            if case_fields := case.fields:
-                # Merge existing fields with new fields
-                existing_fields = await self.fields.get_fields(case) or {}
-                await self.fields.update_field_values(
-                    case_fields.id, existing_fields | fields
-                )
-            else:
-                # Case has no fields row yet, create one
-                existing_fields: dict[str, Any] = {}
-                await self.fields.create_field_values(case, fields)
+            # Get existing fields for diff calculation
+            existing_fields = await self.fields.get_fields(case) or {}
+
+            # Upsert the field values (handles both create and update)
+            await self.fields.upsert_field_values(case, fields)
+
+            # Calculate diffs for event
             diffs = []
             for field, value in fields.items():
                 old_value = existing_fields.get(field)
@@ -702,117 +812,211 @@ class CasesService(BaseWorkspaceService):
         await self.session.commit()
 
 
-class CaseFieldsService(BaseWorkspaceService):
-    """Service that manages the fields table."""
+class CaseFieldsService(CustomFieldsService):
+    """Service that manages workspace-scoped case fields.
+
+    CaseFields is the workspace-level definition storing schema metadata.
+    The actual per-case values are stored in the workspace's custom fields schema in the `case_fields` table.
+    """
 
     service_name = "case_fields"
-    _table = CaseFields.__tablename__
-    _schema = "public"
+    # Hardcoded to preserve existing workspace-scoped table names
+    # (metadata table was renamed from case_fields to case_field)
+    _table = "case_fields"
+    _reserved_columns = {"id", "case_id", "created_at", "updated_at", "workspace_id"}
 
-    def __init__(self, session: AsyncSession, role: Role | None = None):
-        super().__init__(session, role)
-        self.editor = TableEditorService(
-            session=self.session,
-            role=self.role,
-            table_name=self._table,
-            schema_name=self._schema,
+    def _table_definition(self) -> sa.Table:
+        """Return the SQLAlchemy Table definition for the case_fields workspace table."""
+        return sa.Table(
+            self.sanitized_table_name,
+            sa.MetaData(),
+            sa.Column("id", UUID(as_uuid=True), primary_key=True),
+            sa.Column("case_id", UUID(as_uuid=True), unique=True, nullable=False),
+            sa.Column(
+                "created_at",
+                sa.TIMESTAMP(timezone=True),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+            sa.Column(
+                "updated_at",
+                sa.TIMESTAMP(timezone=True),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+            # Use the actual Case table column to avoid metadata resolution issues
+            sa.ForeignKeyConstraint(
+                ["case_id"],
+                [Case.__table__.c.id],
+                name="fk_case_fields_case",
+                ondelete="CASCADE",
+            ),
+            schema=self.schema_name,
         )
 
-    async def list_fields(
-        self,
-    ) -> Sequence[sa.engine.interfaces.ReflectedColumn]:
-        """List all case fields.
+    async def get_field_schema(self) -> dict[str, Any]:
+        """Get the field schema (column definitions) for this workspace.
 
-        Returns:
-            The case fields
+        Returns a dict mapping field_id -> {type, options (only for SELECT/MULTI_SELECT)}
         """
+        stmt = sa.select(CaseFields.schema).where(
+            CaseFields.workspace_id == self.workspace_id
+        )
+        result = await self.session.execute(stmt)
+        schema = result.scalar_one_or_none()
+        return schema or {}
 
-        return await self.editor.get_columns()
-
-    async def create_field(self, params: CaseFieldCreate) -> None:
-        """Create a new case field.
+    async def _update_field_schema(
+        self, field_id: str, field_def: dict[str, Any] | None
+    ) -> None:
+        """Update the field schema for a specific field.
 
         Args:
-            params: The parameters for the field to create
+            field_id: The field name/id
+            field_def: The field definition dict {type, options (for SELECT/MULTI_SELECT only)} or None to remove
         """
-        params.nullable = True  # For now, all fields are nullable
+        stmt = sa.select(CaseFields).where(CaseFields.workspace_id == self.workspace_id)
+        result = await self.session.execute(stmt)
+        definition = result.scalar_one_or_none()
+
+        if definition is None:
+            definition = CaseFields(workspace_id=self.workspace_id, schema={})
+            self.session.add(definition)
+            await self.session.flush()
+
+        current_schema = definition.schema or {}
+
+        if field_def is None:
+            current_schema.pop(field_id, None)
+        else:
+            current_schema[field_id] = field_def
+
+        definition.schema = current_schema
+        flag_modified(definition, "schema")
+        await self.session.flush()
+
+    async def create_field(self, params: CustomFieldCreate) -> None:
+        """Create a new custom field column and update the schema."""
+
+        await self._ensure_schema_ready()
+        params.nullable = True  # Custom fields remain nullable by default
         await self.editor.create_column(params)
-        await self.session.commit()
 
-    async def update_field(self, field_id: str, params: CaseFieldUpdate) -> None:
-        """Update a case field.
+        # Store field metadata in schema
+        # Schema structure: {field_name: {type, options (only for SELECT/MULTI_SELECT)}}
+        field_def: dict[str, Any] = {"type": params.type.value}
 
-        Args:
-            field_id: The name of the field to update
-            params: The parameters for the field to update
-        """
-        await self.editor.update_column(field_id, params)
+        # Only include options for SELECT/MULTI_SELECT types
+        if params.type in (SqlType.SELECT, SqlType.MULTI_SELECT) and params.options:
+            field_def["options"] = normalize_column_options(params.options)
+
+        await self._update_field_schema(params.name, field_def)
+
         await self.session.commit()
 
     async def delete_field(self, field_id: str) -> None:
-        """Delete a case field.
-
-        Args:
-            field_id: The name of the field to delete
-        """
-        if field_id in CaseFields.model_fields:
+        """Delete a custom field and remove it from the schema."""
+        await self._ensure_schema_ready()
+        if field_id in self._reserved_columns:
             raise ValueError(f"Field {field_id} is a reserved field")
+
+        # Remove from schema first
+        await self._update_field_schema(field_id, None)
 
         await self.editor.delete_column(field_id)
         await self.session.commit()
 
-    async def get_fields(self, case: Case) -> dict[str, Any] | None:
-        """Get the fields for a case.
+    async def ensure_workspace_row(self, case_id: uuid.UUID) -> uuid.UUID:
+        """Ensure a workspace data row exists for the given case.
 
         Args:
-            case: The case to get fields for
-        """
-        if case.fields is None:
-            return None
-        return await self.editor.get_row(case.fields.id)
+            case_id: The case ID to ensure a row exists for
 
-    async def create_field_values(
+        Returns:
+            The row ID for the case's field values
+
+        Raises:
+            TracecatException: If the row could not be created or retrieved
+        """
+        await self._ensure_schema_ready()
+        table = self._table_definition()
+        row_id = uuid.uuid4()
+
+        # Use ON CONFLICT DO UPDATE SET id = id to ensure we always get a row ID back,
+        # even if the row already exists. This prevents race conditions where two
+        # concurrent requests both try to insert the same row.
+        insert_stmt = insert(table).values(id=row_id, case_id=case_id)
+        stmt = insert_stmt.on_conflict_do_update(
+            index_elements=[table.c.case_id],
+            set_={table.c.id: table.c.id},  # No-op update to ensure RETURNING works
+        ).returning(table.c.id)
+
+        result = await self.session.execute(stmt)
+        inserted_id = result.scalar_one_or_none()
+
+        if inserted_id is None:
+            raise TracecatException(
+                "Failed to ensure case fields workspace row for the given case."
+            )
+
+        return inserted_id
+
+    async def get_fields(self, case: Case) -> dict[str, Any] | None:
+        """Retrieve custom field values for a case."""
+        await self._ensure_schema_ready()
+        table = self._table_definition()
+        row_id = await self.session.scalar(
+            sa.select(table.c.id).where(table.c.case_id == case.id)
+        )
+        return await self.editor.get_row(row_id) if row_id else None
+
+    async def upsert_field_values(
         self, case: Case, fields: dict[str, Any]
     ) -> dict[str, Any]:
-        """Add fields to a case. Non-transactional.
+        """Upsert custom field values for a case.
+
+        This method ensures the workspace row exists and updates field values.
+        It does NOT commit - the caller is responsible for committing the transaction
+        to ensure atomicity with other operations (e.g., case creation/update).
 
         Args:
-            case: The case to add fields to
-            fields: The fields to add
-        """
-        # Create a new CaseFields record with case_id
-        case_fields = CaseFields(case_id=case.id)
-        self.session.add(case_fields)
-        await self.session.flush()  # Populate the ID
+            case: The case to upsert field values for
+            fields: Dictionary of field names to values
 
-        # This will use the created case_fields ID
+        Returns:
+            Dictionary containing the updated row data
+
+        Raises:
+            TracecatException: If the case has no workspace or if field operations fail
+            TracecatNotFoundError: If the row is not found after ensuring it exists
+        """
+        if case.workspace_id is None:
+            raise TracecatException(
+                "Cannot upsert case fields without an owning workspace."
+            )
+        row_id = await self.ensure_workspace_row(case.id)
+
         try:
             if fields:
-                # If fields provided, update the row with those values
-                res = await self.editor.update_row(row_id=case_fields.id, data=fields)
+                res = await self.editor.update_row(row_id=row_id, data=fields)
                 await self.session.flush()
                 return res
-            else:
-                # If no fields provided, just get the row to return defaults
-                res = await self.editor.get_row(row_id=case_fields.id)
-                return res
+            return await self.editor.get_row(row_id=row_id)
         except TracecatNotFoundError as e:
-            # This happens when UPDATE/SELECT finds no row - shouldn't occur after INSERT
             self.logger.error(
-                "Case fields row not found after creation",
-                case_fields_id=case_fields.id,
+                "Case fields row not found after upsert",
+                row_id=row_id,
                 case_id=case.id,
                 fields=fields,
                 error=str(e),
             )
-            # Extract field names for better error message
             field_names = list(fields.keys()) if fields else []
             field_info = (
                 f" Fields attempted: {', '.join(field_names)}." if field_names else ""
             )
             raise TracecatException(
-                f"Failed to save custom field values for case. The field row was created but could not be updated.{field_info} "
-                "Please verify all custom fields exist in Settings > Cases > Custom Fields and have correct data types."
+                "Failed to save custom field values for case. The field row was upserted but could not be updated."
+                f"{field_info} Please verify all custom fields exist in Settings > Cases > Custom Fields and have correct data types."
             ) from e
         except ProgrammingError as e:
             while cause := e.__cause__:
@@ -823,26 +1027,6 @@ class CaseFieldsService(BaseWorkspaceService):
                 ) from e
             raise TracecatException(
                 "Failed to create case fields due to an unexpected error."
-            ) from e
-
-    async def update_field_values(self, id: uuid.UUID, fields: dict[str, Any]) -> None:
-        """Update a case field value. Non-transactional.
-
-        Args:
-            id: The id of the case field to update
-            fields: The fields to update
-        """
-        try:
-            await self.editor.update_row(id, fields)
-        except ProgrammingError as e:
-            while cause := e.__cause__:
-                e = cause
-            if isinstance(e, UndefinedColumnError):
-                raise TracecatException(
-                    "Failed to update case fields. One or more custom fields do not exist. Please ensure these fields have been created and try again."
-                ) from e
-            raise TracecatException(
-                "Failed to update case fields due to an unexpected error."
             ) from e
 
 
@@ -862,12 +1046,12 @@ class CaseCommentsService(BaseWorkspaceService):
             The comment if found, None otherwise
         """
         statement = select(CaseComment).where(
-            CaseComment.owner_id == self.workspace_id,
+            CaseComment.workspace_id == self.workspace_id,
             CaseComment.id == comment_id,
         )
 
-        result = await self.session.exec(statement)
-        return result.first()
+        result = await self.session.execute(statement)
+        return result.scalars().first()
 
     async def list_comments(
         self, case: Case, *, with_users: bool = True
@@ -889,17 +1073,17 @@ class CaseCommentsService(BaseWorkspaceService):
                 .where(CaseComment.case_id == case.id)
                 .order_by(cast(CaseComment.created_at, sa.DateTime))
             )
-            result = await self.session.exec(statement)
-            return list(result.all())
+            result = await self.session.execute(statement)
+            return list(result.tuples().all())
         else:
             statement = (
                 select(CaseComment)
                 .where(CaseComment.case_id == case.id)
                 .order_by(cast(CaseComment.created_at, sa.DateTime))
             )
-            result = await self.session.exec(statement)
+            result = await self.session.execute(statement)
             # Return in the same format as the join query for consistency
-            return [(comment, None) for comment in result.all()]
+            return [(comment, None) for comment in result.scalars().all()]
 
     async def create_comment(
         self, case: Case, params: CaseCommentCreate
@@ -914,7 +1098,7 @@ class CaseCommentsService(BaseWorkspaceService):
             The created comment
         """
         comment = CaseComment(
-            owner_id=self.workspace_id,
+            workspace_id=self.workspace_id,
             case_id=case.id,
             content=params.content,
             parent_id=params.parent_id,
@@ -992,10 +1176,15 @@ class CaseEventsService(BaseWorkspaceService):
         statement = (
             select(CaseEvent)
             .where(CaseEvent.case_id == case.id)
-            .order_by(desc(col(CaseEvent.created_at)))
+            # Order by creation time (newest first) and fall back to surrogate_id
+            # to ensure deterministic ordering when timestamps are equal.
+            .order_by(
+                CaseEvent.created_at.desc(),
+                CaseEvent.surrogate_id.desc(),
+            )
         )
-        result = await self.session.exec(statement)
-        return result.all()
+        result = await self.session.execute(statement)
+        return result.scalars().all()
 
     async def create_event(self, case: Case, event: CaseEventVariant) -> CaseEvent:
         """Create a new activity record for a case with variant-specific data.
@@ -1006,7 +1195,7 @@ class CaseEventsService(BaseWorkspaceService):
         """
 
         db_event = CaseEvent(
-            owner_id=self.workspace_id,
+            workspace_id=self.workspace_id,
             case_id=case.id,
             type=event.type,
             data=event.model_dump(exclude={"type"}, mode="json"),
@@ -1031,16 +1220,16 @@ class CaseEventsService(BaseWorkspaceService):
         stmt = (
             select(CaseEvent)
             .where(
-                CaseEvent.owner_id == self.workspace_id,
+                CaseEvent.workspace_id == self.workspace_id,
                 CaseEvent.case_id == case.id,
                 CaseEvent.type == CaseEventType.CASE_VIEWED,
                 CaseEvent.user_id == self.role.user_id,
             )
-            .order_by(desc(col(CaseEvent.created_at)))
+            .order_by(CaseEvent.created_at.desc())
             .limit(1)
         )
-        result = await self.session.exec(stmt)
-        last_event = result.first()
+        result = await self.session.execute(stmt)
+        last_event = result.scalars().first()
         if last_event:
             last_created_at = last_event.created_at
             if last_created_at.tzinfo is None:
@@ -1070,16 +1259,16 @@ class CaseTasksService(BaseWorkspaceService):
         statement = (
             select(CaseTask)
             .where(
-                CaseTask.owner_id == self.workspace_id,
+                CaseTask.workspace_id == self.workspace_id,
                 CaseTask.case_id == case_id,
             )
             .order_by(
-                col(CaseTask.priority).desc(),
+                CaseTask.priority.desc(),
                 cast(CaseTask.created_at, sa.DateTime),
             )
         )
-        result = await self.session.exec(statement)
-        return result.all()
+        result = await self.session.execute(statement)
+        return result.scalars().all()
 
     async def get_task(self, task_id: uuid.UUID) -> CaseTask:
         """Get a task by ID.
@@ -1094,14 +1283,65 @@ class CaseTasksService(BaseWorkspaceService):
             TracecatNotFoundError: If the task is not found
         """
         statement = select(CaseTask).where(
-            CaseTask.owner_id == self.workspace_id,
+            CaseTask.workspace_id == self.workspace_id,
             CaseTask.id == task_id,
         )
-        result = await self.session.exec(statement)
-        task = result.first()
+        result = await self.session.execute(statement)
+        task = result.scalars().first()
         if not task:
             raise TracecatNotFoundError(f"Task {task_id} not found")
         return task
+
+    async def _validate_default_trigger_values(
+        self,
+        workflow_id: uuid.UUID | None,
+        default_trigger_values: dict[str, Any],
+    ) -> None:
+        """Validate default_trigger_values against workflow's expects schema.
+
+        Args:
+            workflow_id: The workflow ID to validate against
+            default_trigger_values: The trigger values to validate
+
+        Raises:
+            TracecatNotFoundError: If the workflow is not found
+            TracecatValidationError: If values don't match schema
+        """
+
+        if not workflow_id:
+            raise TracecatValidationError(
+                "Cannot set default_trigger_values without a workflow_id"
+            )
+        # Fetch workflow
+        stmt = select(Workflow).where(
+            Workflow.workspace_id == self.workspace_id,
+            Workflow.id == workflow_id,
+        )
+        result = await self.session.execute(stmt)
+        workflow = result.scalars().first()
+
+        if not workflow:
+            raise TracecatNotFoundError(f"Workflow {workflow_id} not found")
+
+        # Skip validation if workflow has no expects schema
+        if not workflow.expects:
+            return
+
+        expects_schema = {
+            field_name: ExpectedField.model_validate(field_schema)
+            for field_name, field_schema in workflow.expects.items()
+        }
+
+        validator = create_expectation_model(
+            expects_schema, model_name="DefaultTriggerValuesValidator"
+        )
+
+        try:
+            validator(**default_trigger_values)
+        except ValidationError as e:
+            raise TracecatValidationError(
+                f"Invalid default_trigger_values for workflow '{workflow.title}': {e}"
+            ) from e
 
     async def create_task(self, case_id: uuid.UUID, params: CaseTaskCreate) -> CaseTask:
         """Create a new task for a case.
@@ -1117,11 +1357,11 @@ class CaseTasksService(BaseWorkspaceService):
             TracecatNotFoundError: If the case is not found in the current workspace
         """
         statement = select(Case).where(
-            Case.owner_id == self.workspace_id,
+            Case.workspace_id == self.workspace_id,
             Case.id == case_id,
         )
-        result = await self.session.exec(statement)
-        case = result.first()
+        result = await self.session.execute(statement)
+        case = result.scalars().first()
         if not case:
             raise TracecatNotFoundError(f"Case {case_id} not found")
 
@@ -1130,8 +1370,13 @@ class CaseTasksService(BaseWorkspaceService):
             WorkflowUUID.new(params.workflow_id) if params.workflow_id else None
         )
 
+        if params.default_trigger_values:
+            await self._validate_default_trigger_values(
+                workflow_uuid, params.default_trigger_values
+            )
+
         task = CaseTask(
-            owner_id=self.workspace_id,
+            workspace_id=self.workspace_id,
             case_id=case_id,
             title=params.title,
             description=params.description,
@@ -1139,6 +1384,7 @@ class CaseTasksService(BaseWorkspaceService):
             status=params.status,
             assignee_id=params.assignee_id,
             workflow_id=workflow_uuid,
+            default_trigger_values=params.default_trigger_values,
         )
         self.session.add(task)
         # Flush to get task ID before emitting event
@@ -1180,11 +1426,11 @@ class CaseTasksService(BaseWorkspaceService):
 
         # Load case for event context
         statement = select(Case).where(
-            Case.owner_id == self.workspace_id,
+            Case.workspace_id == self.workspace_id,
             Case.id == task.case_id,
         )
-        result = await self.session.exec(statement)
-        case = result.first()
+        result = await self.session.execute(statement)
+        case = result.scalars().first()
         if not case:
             raise TracecatNotFoundError(f"Case {task.case_id} not found")
 
@@ -1252,6 +1498,18 @@ class CaseTasksService(BaseWorkspaceService):
                 # Convert workflow_id from AnyWorkflowID to UUID
                 new_wfid = WorkflowUUID.new(params.workflow_id)
 
+            # Validate existing default_trigger_values against new workflow if both exist
+            # Only validate if default_trigger_values is NOT being updated in this request
+            # (if it is, the new values will be validated later)
+            if (
+                new_wfid
+                and task.default_trigger_values
+                and "default_trigger_values" not in params.model_fields_set
+            ):
+                await self._validate_default_trigger_values(
+                    new_wfid, task.default_trigger_values
+                )
+
             if old_wfid != new_wfid:
                 task.workflow_id = new_wfid
                 await events_svc.create_event(
@@ -1264,6 +1522,15 @@ class CaseTasksService(BaseWorkspaceService):
                         wf_exec_id=wf_exec_id,
                     ),
                 )
+
+        # default_trigger_values change - validate against current workflow if it exists
+        if "default_trigger_values" in params.model_fields_set:
+            new_default_values = set_fields.pop("default_trigger_values", None)
+            if new_default_values:
+                await self._validate_default_trigger_values(
+                    task.workflow_id, new_default_values
+                )
+            task.default_trigger_values = new_default_values
 
         # Title and description - update silently without events
         if (new_title := set_fields.pop("title", None)) is not None:
@@ -1292,11 +1559,11 @@ class CaseTasksService(BaseWorkspaceService):
 
         # Load case for event context
         statement = select(Case).where(
-            Case.owner_id == self.workspace_id,
+            Case.workspace_id == self.workspace_id,
             Case.id == task.case_id,
         )
-        result = await self.session.exec(statement)
-        case = result.first()
+        result = await self.session.execute(statement)
+        case = result.scalars().first()
         if not case:
             raise TracecatNotFoundError(f"Case {task.case_id} not found")
 

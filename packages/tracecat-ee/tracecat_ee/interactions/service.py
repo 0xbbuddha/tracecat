@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
-from sqlmodel import select
+from sqlalchemy import select
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
@@ -268,7 +268,7 @@ class InteractionService(BaseWorkspaceService):
             response_payload=params.response_payload,
             expires_at=params.expires_at,
             actor=params.actor,
-            owner_id=self.workspace_id,
+            workspace_id=self.workspace_id,
         )
         self.session.add(interaction)
         await self.session.commit()
@@ -285,11 +285,11 @@ class InteractionService(BaseWorkspaceService):
             The interaction if found, None otherwise
         """
         statement = select(Interaction).where(
-            Interaction.owner_id == self.workspace_id,
+            Interaction.workspace_id == self.workspace_id,
             Interaction.id == interaction_id,
         )
-        result = await self.session.exec(statement)
-        return result.first()
+        result = await self.session.execute(statement)
+        return result.scalars().first()
 
     async def update_interaction(
         self, interaction: Interaction, params: InteractionUpdate
@@ -323,11 +323,13 @@ class InteractionService(BaseWorkspaceService):
         Returns:
             Sequence of interactions for the workflow
         """
-        statement = select(Interaction).where(Interaction.owner_id == self.workspace_id)
+        statement = select(Interaction).where(
+            Interaction.workspace_id == self.workspace_id
+        )
         if wf_exec_id:
             statement = statement.where(Interaction.wf_exec_id == wf_exec_id)
-        result = await self.session.exec(statement)
-        return result.all()
+        result = await self.session.execute(statement)
+        return result.scalars().all()
 
     async def delete_interaction(self, interaction: Interaction) -> None:
         """Delete an interaction by ID.

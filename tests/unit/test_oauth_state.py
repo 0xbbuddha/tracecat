@@ -6,11 +6,10 @@ from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
-import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, SecretStr
-from sqlmodel import col, select
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tracecat import config
 from tracecat.auth.types import AccessLevel, Role
@@ -38,9 +37,9 @@ class MockOAuthProvider(AuthorizationCodeOAuthProvider):
     """Mock OAuth provider for testing."""
 
     id: ClassVar[str] = "mock_oauth_state_provider"
-    _authorization_endpoint: ClassVar[str] = "https://mock.provider/oauth/authorize"
-    _token_endpoint: ClassVar[str] = "https://mock.provider/oauth/token"
-    config_model: ClassVar[type[BaseModel]] = MockProviderConfig
+    _authorization_endpoint: ClassVar[str] = "https://mock.provider/oauth/authorize"  # type: ignore[assignment]
+    _token_endpoint: ClassVar[str] = "https://mock.provider/oauth/token"  # type: ignore[assignment]
+    config_model: ClassVar[type[BaseModel]] = MockProviderConfig  # type: ignore[assignment]
     scopes: ClassVar[ProviderScopes] = ProviderScopes(
         default=["read", "write"],
     )
@@ -184,19 +183,17 @@ class TestOAuthState:
         await session.commit()
 
         # Perform cleanup
-        stmt = sa.delete(OAuthStateDB).where(
-            col(OAuthStateDB.expires_at) < current_time
-        )
-        await session.exec(stmt)  # type: ignore
+        stmt = delete(OAuthStateDB).where(OAuthStateDB.expires_at < current_time)
+        await session.execute(stmt)
         await session.commit()
 
         # Verify only valid state remains
-        stmt = select(OAuthStateDB).where(col(OAuthStateDB.state) == valid_state.state)
-        result = await session.exec(stmt)
-        remaining_states = result.all()
+        stmt = select(OAuthStateDB).where(OAuthStateDB.state == valid_state.state)
+        result = await session.execute(stmt)
+        remaining_states = result.scalars().all()
 
         assert len(remaining_states) == 1
-        assert remaining_states[0].state == valid_state.state  # type: ignore
+        assert remaining_states[0].state == valid_state.state
 
     async def test_oauth_state_with_for_update_lock(
         self,
@@ -231,9 +228,9 @@ class TestOAuthState:
         await session.commit()
 
         # Verify it's deleted
-        stmt = select(OAuthStateDB).where(col(OAuthStateDB.state) == state_id)
-        result = await session.exec(stmt)
-        assert result.first() is None
+        stmt = select(OAuthStateDB).where(OAuthStateDB.state == state_id)
+        result = await session.execute(stmt)
+        assert result.scalars().first() is None
 
     async def test_oauth_state_validation(
         self,
@@ -273,7 +270,7 @@ class TestOAuthState:
         # Create a second workspace for the "wrong workspace" test
         wrong_workspace = Workspace(
             name="wrong-test-workspace",
-            owner_id=config.TRACECAT__DEFAULT_ORG_ID,
+            organization_id=config.TRACECAT__DEFAULT_ORG_ID,
         )
         session.add(wrong_workspace)
         await session.commit()

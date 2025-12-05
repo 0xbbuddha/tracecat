@@ -8,29 +8,31 @@ from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from tracecat.auth.types import Role
-from tracecat.db.models import Schedule, Workflow, WorkflowDefinition
+from tracecat.core.schemas import Schema
+from tracecat.db.models import Workflow, WorkflowDefinition
 from tracecat.dsl.common import DSLInput, DSLRunArgs
 from tracecat.dsl.schemas import ActionStatement, DSLConfig
 from tracecat.expressions.expectations import ExpectedField
-from tracecat.identifiers import OwnerID, WorkspaceID
+from tracecat.identifiers import WorkspaceID
 from tracecat.identifiers.workflow import AnyWorkflowID, WorkflowIDShort, WorkflowUUID
 from tracecat.tags.schemas import TagRead
 from tracecat.validation.schemas import ValidationResult
 from tracecat.webhooks.schemas import WebhookRead
 from tracecat.workflow.actions.schemas import ActionRead
+from tracecat.workflow.schedules.schemas import ScheduleRead
 
 
-class WorkflowRead(BaseModel):
+class WorkflowRead(Schema):
     id: WorkflowIDShort
     title: str
     description: str
     status: str
     actions: dict[str, ActionRead]
     object: dict[str, Any] | None  # React Flow object
-    owner_id: OwnerID
+    workspace_id: WorkspaceID
     version: int | None = None
     webhook: WebhookRead
-    schedules: list[Schedule]
+    schedules: list[ScheduleRead]
     entrypoint: str | None
     expects: dict[str, ExpectedField] | None = None
     expects_schema: dict[str, Any] | None = None
@@ -40,13 +42,25 @@ class WorkflowRead(BaseModel):
     error_handler: str | None = None
 
 
-class WorkflowDefinitionReadMinimal(BaseModel):
+class WorkflowDefinitionReadMinimal(Schema):
     id: str
     version: int
     created_at: datetime
 
 
-class WorkflowReadMinimal(BaseModel):
+class WorkflowDefinitionRead(Schema):
+    """API response model for persisted workflow definitions."""
+
+    id: str
+    workflow_id: WorkflowUUID | None
+    workspace_id: WorkspaceID
+    version: int
+    content: dict[str, Any] | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkflowReadMinimal(Schema):
     """Minimal version of WorkflowRead model for list endpoints."""
 
     id: WorkflowIDShort
@@ -138,7 +152,7 @@ class ExternalWorkflowDefinition(BaseModel):
         description=(
             "If provided, can only be restored in the same workspace (TBD)."
             "Otherwise, can be added to any workspace."
-            "This will be set to `owner_id`"
+            "This will be set to `workspace_id`"
         ),
     )
     workflow_id: WorkflowUUID | None = Field(
@@ -159,12 +173,12 @@ class ExternalWorkflowDefinition(BaseModel):
     @staticmethod
     def from_database(defn: WorkflowDefinition) -> ExternalWorkflowDefinition:
         return ExternalWorkflowDefinition(
-            workspace_id=defn.owner_id,
+            workspace_id=defn.workspace_id,
             workflow_id=WorkflowUUID.new(defn.workflow_id),
             created_at=defn.created_at,
             updated_at=defn.updated_at,
             version=defn.version,
-            definition=DSLInput(**defn.content),
+            definition=DSLInput.model_validate(defn.content),
         )
 
     @field_validator("workflow_id", mode="before")
@@ -189,7 +203,7 @@ class WorkflowCommitResponse(BaseModel):
         )
 
 
-class WorkflowDSLCreateResponse(BaseModel):
+class WorkflowDSLCreateResponse(Schema):
     workflow: Workflow | None = None
     errors: list[ValidationResult] | None = None
 

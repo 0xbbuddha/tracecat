@@ -9,7 +9,7 @@ Create Date: 2025-10-21 12:43:53.678129
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-import sqlmodel.sql.sqltypes
+from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
@@ -37,7 +37,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("surrogate_id", sa.Integer(), nullable=False),
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("owner_id", sa.UUID(), nullable=True),
         sa.Column("case_id", sa.UUID(), nullable=False),
         sa.Column("definition_id", sa.UUID(), nullable=False),
@@ -46,18 +46,37 @@ def upgrade() -> None:
         sa.Column("started_at", sa.TIMESTAMP(timezone=True), nullable=True),
         sa.Column("ended_at", sa.TIMESTAMP(timezone=True), nullable=True),
         sa.Column("duration", sa.Interval(), nullable=True),
-        sa.ForeignKeyConstraint(["case_id"], ["cases.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
-            ["definition_id"], ["case_duration_definition.id"], ondelete="CASCADE"
+            ["case_id"],
+            ["cases.id"],
+            ondelete="CASCADE",
+            name="case_duration_case_id_fkey",
         ),
         sa.ForeignKeyConstraint(
-            ["end_event_id"], ["case_event.id"], ondelete="SET NULL"
+            ["definition_id"],
+            ["case_duration_definition.id"],
+            ondelete="CASCADE",
+            name="case_duration_definition_id_fkey",
         ),
-        sa.ForeignKeyConstraint(["owner_id"], ["workspace.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
-            ["start_event_id"], ["case_event.id"], ondelete="SET NULL"
+            ["end_event_id"],
+            ["case_event.id"],
+            ondelete="SET NULL",
+            name="case_duration_end_event_id_fkey",
         ),
-        sa.PrimaryKeyConstraint("surrogate_id"),
+        sa.ForeignKeyConstraint(
+            ["owner_id"],
+            ["workspace.id"],
+            ondelete="CASCADE",
+            name="case_duration_owner_id_fkey",
+        ),
+        sa.ForeignKeyConstraint(
+            ["start_event_id"],
+            ["case_event.id"],
+            ondelete="SET NULL",
+            name="case_duration_start_event_id_fkey",
+        ),
+        sa.PrimaryKeyConstraint("surrogate_id", name="case_duration_pkey"),
         sa.UniqueConstraint(
             "case_id", "definition_id", name="uq_case_duration_case_definition"
         ),

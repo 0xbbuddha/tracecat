@@ -4,24 +4,35 @@ import { zodResolver } from "@hookform/resolvers/zod"
 import {
   AlertCircle,
   Bot,
+  Box,
+  Braces,
+  Brackets,
+  Hash,
+  List,
+  ListOrdered,
+  ListTodo,
   Loader2,
   MessageCircle,
+  MoreVertical,
+  Percent,
   Plus,
   RotateCcw,
+  Save,
+  ToggleLeft,
   Trash2,
+  Type,
 } from "lucide-react"
 import Link from "next/link"
-import { useRouter } from "next/navigation"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import {
   type MouseEvent,
   useCallback,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
 } from "react"
-import { type Control, useFieldArray, useForm } from "react-hook-form"
+import { useFieldArray, useForm } from "react-hook-form"
 import { z } from "zod"
 import type {
   AgentPresetCreate,
@@ -31,7 +42,8 @@ import type {
 } from "@/client"
 import { ActionSelect } from "@/components/chat/action-select"
 import { ChatSessionPane } from "@/components/chat/chat-session-pane"
-import { getIcon } from "@/components/icons"
+import { CodeEditor } from "@/components/editor/codemirror/code-editor"
+import { getIcon, ProviderIcon } from "@/components/icons"
 import { CenteredSpinner } from "@/components/loading/spinner"
 import { MultiTagCommandInput, type Suggestion } from "@/components/tags-input"
 import { SimpleEditor } from "@/components/tiptap-templates/simple/simple-editor"
@@ -50,13 +62,26 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty"
+import {
   Form,
   FormControl,
   FormDescription,
   FormField,
   FormItem,
   FormLabel,
-  FormMessage,
 } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
 import {
@@ -77,6 +102,12 @@ import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
+import {
   useAgentPreset,
   useAgentPresets,
   useCreateAgentPreset,
@@ -89,20 +120,23 @@ import type { ModelInfo } from "@/lib/chat"
 import {
   useAgentModels,
   useChatReadiness,
+  useIntegrations,
   useModelProviders,
-  useModelProvidersStatus,
   useRegistryActions,
+  useWorkspaceModelProvidersStatus,
 } from "@/lib/hooks"
 import { cn, slugify } from "@/lib/utils"
 import { useWorkspaceId } from "@/providers/workspace-id"
 
-const PRESET_OUTPUT_TYPES = [
-  { label: "Text (str)", value: "str" },
-  { label: "Boolean", value: "bool" },
-  { label: "Number (int)", value: "int" },
-  { label: "Number (float)", value: "float" },
-  { label: "List of text", value: "list[str]" },
-  { label: "List of numbers", value: "list[int]" },
+const DATA_TYPE_OUTPUT_TYPES = [
+  { label: "String", value: "str", icon: Type },
+  { label: "Boolean", value: "bool", icon: ToggleLeft },
+  { label: "Integer", value: "int", icon: Hash },
+  { label: "Float", value: "float", icon: Percent },
+  { label: "List of booleans", value: "list[bool]", icon: ListTodo },
+  { label: "List of floats", value: "list[float]", icon: Brackets },
+  { label: "List of integers", value: "list[int]", icon: ListOrdered },
+  { label: "List of strings", value: "list[str]", icon: List },
 ] as const
 
 const NEW_PRESET_ID = "new"
@@ -117,33 +151,17 @@ const agentPresetSchema = z
     model_provider: z.string().min(1, "Model provider is required"),
     model_name: z.string().min(1, "Model name is required"),
     base_url: z.union([z.string().url(), z.literal(""), z.undefined()]),
-    outputTypeKind: z.enum(["none", "preset", "json"]),
-    outputTypePreset: z.string().optional(),
+    outputTypeKind: z.enum(["none", "data-type", "json"]),
+    outputTypeDataType: z.string().optional(),
     outputTypeJson: z.string().optional(),
     actions: z.array(z.string()).default([]),
     namespaces: z.array(z.string()).default([]),
+    mcpIntegrations: z.array(z.string()).default([]),
     toolApprovals: z
       .array(
         z.object({
           tool: z.string().min(1, "Tool name is required"),
           allow: z.boolean(),
-        })
-      )
-      .default([]),
-    mcpServerUrl: z.union([z.string().url(), z.literal(""), z.undefined()]),
-    mcpServerHeaders: z
-      .array(
-        z.object({
-          key: z.string().min(1, "Header key is required"),
-          value: z.string().optional(),
-        })
-      )
-      .default([]),
-    modelSettings: z
-      .array(
-        z.object({
-          key: z.string().min(1, "Setting key is required"),
-          value: z.string().optional(),
         })
       )
       .default([]),
@@ -153,9 +171,9 @@ const agentPresetSchema = z
       .min(0, "Retries must be 0 or more"),
   })
   .superRefine((data, ctx) => {
-    if (data.outputTypeKind === "preset" && !data.outputTypePreset) {
+    if (data.outputTypeKind === "data-type" && !data.outputTypeDataType) {
       ctx.addIssue({
-        path: ["outputTypePreset"],
+        path: ["outputTypeDataType"],
         code: z.ZodIssueCode.custom,
         message: "Select an output type",
       })
@@ -194,7 +212,6 @@ const agentPresetSchema = z
 
 type AgentPresetFormValues = z.infer<typeof agentPresetSchema>
 type ToolApprovalFormValue = AgentPresetFormValues["toolApprovals"][number]
-type KeyValueFormValue = AgentPresetFormValues["modelSettings"][number]
 
 const DEFAULT_FORM_VALUES: AgentPresetFormValues = {
   name: "",
@@ -205,19 +222,19 @@ const DEFAULT_FORM_VALUES: AgentPresetFormValues = {
   model_name: "",
   base_url: "",
   outputTypeKind: "none",
-  outputTypePreset: "",
+  outputTypeDataType: "",
   outputTypeJson: "",
   actions: [],
   namespaces: [],
+  mcpIntegrations: [],
   toolApprovals: [],
-  mcpServerUrl: "",
-  mcpServerHeaders: [],
-  modelSettings: [],
   retries: DEFAULT_RETRIES,
 }
 
 export function AgentPresetsBuilder({ presetId }: { presetId?: string }) {
   const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
   const workspaceId = useWorkspaceId()
   const { isFeatureEnabled, isLoading: featureFlagsLoading } = useFeatureFlag()
   const agentPresetsEnabled = isFeatureEnabled("agent-presets")
@@ -230,7 +247,42 @@ export function AgentPresetsBuilder({ presetId }: { presetId?: string }) {
   const { registryActions } = useRegistryActions()
   const { providers } = useModelProviders()
   const { models } = useAgentModels()
-  const [sidebarTab, setSidebarTab] = useState<"presets" | "chat">("presets")
+
+  const {
+    integrations,
+    providers: integrationProviders,
+    integrationsIsLoading,
+    providersIsLoading: integrationProvidersIsLoading,
+  } = useIntegrations(workspaceId)
+
+  const mcpIntegrations = useMemo(() => {
+    if (!integrations || !integrationProviders) {
+      return []
+    }
+
+    const providerMap = new Map(
+      integrationProviders
+        .filter((provider) => provider.id.endsWith("_mcp"))
+        .map((provider) => [provider.id, provider])
+    )
+
+    return integrations
+      .filter((integration) => providerMap.has(integration.provider_id))
+      .map((integration) => {
+        const provider = providerMap.get(integration.provider_id)!
+        // Remove " MCP" suffix from provider names for cleaner display
+        const displayName = provider.name.replace(/\s*MCP\s*$/i, "")
+        return {
+          providerId: integration.provider_id,
+          name: displayName,
+          description: provider.description,
+        }
+      })
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }, [integrations, integrationProviders])
+
+  const currentTab = searchParams?.get("tab") === "chat" ? "chat" : "presets"
+
   const { createAgentPreset, createAgentPresetIsPending } =
     useCreateAgentPreset(workspaceId)
   const { updateAgentPreset, updateAgentPresetIsPending } =
@@ -247,17 +299,21 @@ export function AgentPresetsBuilder({ presetId }: { presetId?: string }) {
       if (normalizedId === activePresetId) {
         return
       }
-      router.replace(
-        `/workspaces/${workspaceId}/agents/presets/${normalizedId}`
-      )
+      const nextPath = `/workspaces/${workspaceId}/agents/${normalizedId}`
+      const params = new URLSearchParams(searchParams?.toString())
+      params.set("tab", currentTab)
+      const url = params.toString()
+        ? `${nextPath}?${params.toString()}`
+        : nextPath
+      router.replace(url)
     },
-    [activePresetId, router, workspaceId]
+    [activePresetId, router, searchParams, currentTab, workspaceId]
   )
 
   // Fetch full preset data when a preset is selected (not in create mode)
   const selectedPresetId =
     activePresetId === NEW_PRESET_ID ? null : activePresetId
-  const { preset: selectedPreset } = useAgentPreset(
+  const { preset: selectedPreset, presetIsLoading } = useAgentPreset(
     workspaceId,
     selectedPresetId,
     {
@@ -285,13 +341,22 @@ export function AgentPresetsBuilder({ presetId }: { presetId?: string }) {
     }
   }, [presets, handleSetSelectedPresetId, presetId, presetsIsLoading])
 
-  const chatTabDisabled = !selectedPreset
+  const chatTabDisabled =
+    !selectedPreset && !presetIsLoading && !featureFlagsLoading
 
   useEffect(() => {
-    if (chatTabDisabled && sidebarTab === "chat") {
-      setSidebarTab("presets")
+    if (chatTabDisabled && currentTab === "chat") {
+      if (!pathname) {
+        return
+      }
+      const params = new URLSearchParams(searchParams?.toString())
+      params.set("tab", "presets")
+      const url = params.toString()
+        ? `${pathname}?${params.toString()}`
+        : pathname
+      router.replace(url)
     }
-  }, [chatTabDisabled, sidebarTab])
+  }, [chatTabDisabled, pathname, router, searchParams, currentTab])
 
   const actionSuggestions: Suggestion[] = useMemo(() => {
     if (!registryActions) {
@@ -383,12 +448,21 @@ export function AgentPresetsBuilder({ presetId }: { presetId?: string }) {
         <ResizablePanel defaultSize={26} minSize={18}>
           <div className="flex h-full flex-col border-r bg-muted/40">
             <Tabs
-              value={sidebarTab}
+              value={currentTab}
               onValueChange={(value) => {
                 if (value === "chat" && chatTabDisabled) {
                   return
                 }
-                setSidebarTab(value as "presets" | "chat")
+                if (!pathname) {
+                  return
+                }
+                const nextTab = value as "presets" | "chat"
+                const params = new URLSearchParams(searchParams?.toString())
+                params.set("tab", nextTab)
+                const url = params.toString()
+                  ? `${pathname}?${params.toString()}`
+                  : pathname
+                router.replace(url)
               }}
               className="flex h-full flex-col"
             >
@@ -443,6 +517,10 @@ export function AgentPresetsBuilder({ presetId }: { presetId?: string }) {
             namespaceSuggestions={namespaceSuggestions}
             modelOptionsByProvider={modelOptionsByProvider}
             modelProviderOptions={modelProviderOptions}
+            mcpIntegrations={mcpIntegrations}
+            mcpIntegrationsIsLoading={
+              integrationsIsLoading || integrationProvidersIsLoading
+            }
             isSaving={
               selectedPreset
                 ? updateAgentPresetIsPending
@@ -520,29 +598,37 @@ function PresetsSidebar({
         </Button>
       </div>
       <div className="flex-1 min-h-0">
-        <ScrollArea className="h-full">
-          <div className="space-y-1 px-2 py-3">
-            {list.length === 0 ? (
-              <div className="flex h-48 flex-col items-center justify-center gap-2 rounded-md border border-dashed px-3 text-center text-xs text-muted-foreground">
-                <Bot className="size-4 opacity-60" />
-                <span>No saved presets yet.</span>
-                <span>
-                  Create one to reuse agents across workflows and chat.
-                </span>
-              </div>
-            ) : (
-              list.map((preset) => (
+        {list.length === 0 ? (
+          <div className="flex h-full items-center justify-center px-2">
+            <Empty>
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <Bot />
+                </EmptyMedia>
+                <EmptyTitle>No agent preset found.</EmptyTitle>
+                <EmptyDescription>
+                  Create an AI agent preset to reuse across workflows, cases,
+                  and chat.
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          </div>
+        ) : (
+          <ScrollArea className="h-full">
+            <div className="px-2 py-3 space-y-1">
+              {list.map((preset) => (
                 <SidebarItem
                   key={preset.id}
-                  href={`/workspaces/${workspaceId}/agents/presets/${preset.id}`}
+                  href={`/workspaces/${workspaceId}/agents/${preset.id}`}
                   active={selectedId === preset.id}
                   title={preset.name}
-                  description={preset.description ?? preset.slug}
+                  description={preset.description}
+                  slug={preset.slug}
                 />
-              ))
-            )}
-          </div>
-        </ScrollArea>
+              ))}
+            </div>
+          </ScrollArea>
+        )}
       </div>
     </div>
   )
@@ -553,12 +639,14 @@ function SidebarItem({
   href,
   title,
   description,
+  slug,
   status,
 }: {
   active?: boolean
   href: string
   title: string
   description?: string | null
+  slug?: string
   status?: string | null
 }) {
   return (
@@ -573,7 +661,28 @@ function SidebarItem({
     >
       <div className="flex items-center justify-between text-sm font-medium">
         <span className="truncate">{title}</span>
-        {status ? (
+        {slug ? (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Badge
+                  variant="secondary"
+                  className={cn(
+                    "ml-2 shrink-0 text-xs font-normal",
+                    active ? "text-foreground/80" : "text-muted-foreground"
+                  )}
+                >
+                  {slug}
+                </Badge>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>
+                  Agent preset slug used to identify the preset in workflows.
+                </p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        ) : status ? (
           <Badge
             variant="outline"
             className={cn(
@@ -607,9 +716,10 @@ function AgentPresetChatPane({
   workspaceId: string
 }) {
   const [createdChatId, setCreatedChatId] = useState<string | null>(null)
+  const [resetDialogOpen, setResetDialogOpen] = useState(false)
 
   const { providersStatus, isLoading: providersStatusLoading } =
-    useModelProvidersStatus()
+    useWorkspaceModelProvidersStatus(workspaceId)
 
   const { chats, chatsLoading, chatsError, refetchChats } = useListChats(
     {
@@ -678,15 +788,25 @@ function AgentPresetChatPane({
   }
 
   const handleResetChat = async () => {
+    setResetDialogOpen(false)
     await handleStartChat(true)
   }
 
   const renderBody = () => {
     if (!preset) {
       return (
-        <div className="flex h-full flex-col items-center justify-center gap-3 text-xs text-muted-foreground">
-          <MessageCircle className="size-5" />
-          <p>Select a saved preset to start a conversation.</p>
+        <div className="flex h-full items-center justify-center px-4">
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <MessageCircle />
+              </EmptyMedia>
+              <EmptyTitle>Select a saved preset</EmptyTitle>
+              <EmptyDescription>
+                Select a saved preset to start a conversation.
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
         </div>
       )
     }
@@ -705,16 +825,16 @@ function AgentPresetChatPane({
           <div className="flex max-w-xs flex-col items-center gap-2 text-center text-xs text-muted-foreground">
             <AlertCircle className="size-5 text-amber-500" />
             <p className="text-pretty">
-              This agent uses organization credentials for{" "}
+              This agent uses workspace credentials for{" "}
               <span className="font-medium">{preset.model_provider}</span>.
               Configure them on the{" "}
               <Link
-                href={`/organization/settings/agent`}
+                href={`/workspaces/${workspaceId}/credentials`}
                 className="font-medium text-primary hover:underline"
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                organization agent settings page
+                credentials page
               </Link>{" "}
               to enable chat.
             </p>
@@ -740,19 +860,30 @@ function AgentPresetChatPane({
 
     if (!activeChatId) {
       return (
-        <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-xs text-muted-foreground">
-          <Bot className="size-5 text-muted-foreground" />
-          <p>Create a chat session to test this agent live.</p>
-          <Button
-            size="sm"
-            onClick={() => void handleStartChat()}
-            disabled={createChatPending || !canStartChat}
-          >
-            {createChatPending ? (
-              <Loader2 className="mr-2 size-4 animate-spin" />
-            ) : null}
-            Start chat
-          </Button>
+        <div className="flex h-full items-center justify-center px-4">
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <Bot />
+              </EmptyMedia>
+              <EmptyTitle>Live chat</EmptyTitle>
+              <EmptyDescription>
+                Converse with the agent live in a chat session.
+              </EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Button
+                size="sm"
+                onClick={() => void handleStartChat()}
+                disabled={createChatPending || !canStartChat}
+              >
+                {createChatPending ? (
+                  <Loader2 className="mr-1 size-4 animate-spin" />
+                ) : null}
+                Start chat
+              </Button>
+            </EmptyContent>
+          </Empty>
         </div>
       )
     }
@@ -809,23 +940,92 @@ function AgentPresetChatPane({
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => void handleResetChat()}
-            disabled={createChatPending || !canStartChat}
-          >
-            {createChatPending ? (
-              <Loader2 className="mr-2 size-4 animate-spin" />
-            ) : (
-              <RotateCcw className="mr-2 size-4" />
-            )}
-            Reset chat
-          </Button>
+          <AlertDialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
+            <AlertDialogTrigger asChild>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={createChatPending || !canStartChat}
+              >
+                {createChatPending ? (
+                  <Loader2 className="mr-2 size-4 animate-spin" />
+                ) : (
+                  <RotateCcw className="mr-2 size-4" />
+                )}
+                Reset chat
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Reset this chat?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will start a new conversation. Your current chat history
+                  will no longer be accessible.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={() => void handleResetChat()}>
+                  Reset chat
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </div>
       </div>
       <div className="flex-1 min-h-0">{renderBody()}</div>
     </div>
+  )
+}
+
+function AutoResizeTextarea({
+  value,
+  onChange,
+  onBlur,
+  disabled,
+  placeholder,
+  className,
+}: {
+  value: string
+  onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void
+  onBlur: () => void
+  disabled?: boolean
+  placeholder?: string
+  className?: string
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (textarea) {
+      textarea.style.height = "auto"
+      textarea.style.height = `${Math.max(
+        textarea.scrollHeight,
+        3.5 * parseFloat(getComputedStyle(textarea).lineHeight)
+      )}px`
+    }
+  }, [value])
+
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    onChange(e)
+    const textarea = e.target
+    textarea.style.height = "auto"
+    textarea.style.height = `${Math.max(
+      textarea.scrollHeight,
+      3.5 * parseFloat(getComputedStyle(textarea).lineHeight)
+    )}px`
+  }
+
+  return (
+    <Textarea
+      ref={textareaRef}
+      className={className}
+      placeholder={placeholder}
+      value={value}
+      onChange={handleChange}
+      onBlur={onBlur}
+      disabled={disabled}
+    />
   )
 }
 
@@ -841,6 +1041,8 @@ function AgentPresetForm({
   namespaceSuggestions,
   modelProviderOptions,
   modelOptionsByProvider,
+  mcpIntegrations,
+  mcpIntegrationsIsLoading,
 }: {
   preset: AgentPresetRead | null
   mode: "create" | "edit"
@@ -856,8 +1058,13 @@ function AgentPresetForm({
   namespaceSuggestions: Suggestion[]
   modelProviderOptions: string[]
   modelOptionsByProvider: Record<string, { label: string; value: string }[]>
+  mcpIntegrations: {
+    providerId: string
+    name: string
+    description?: string | null
+  }[]
+  mcpIntegrationsIsLoading: boolean
 }) {
-  const slugEditedRef = useRef(mode === "edit")
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
 
   const form = useForm<AgentPresetFormValues>({
@@ -888,28 +1095,9 @@ function AgentPresetForm({
     name: "toolApprovals",
   })
 
-  const {
-    fields: headerFields,
-    append: appendHeader,
-    remove: removeHeader,
-  } = useFieldArray({
-    control: form.control,
-    name: "mcpServerHeaders",
-  })
-
-  const {
-    fields: settingsFields,
-    append: appendSetting,
-    remove: removeSetting,
-  } = useFieldArray({
-    control: form.control,
-    name: "modelSettings",
-  })
-
   useEffect(() => {
     const defaults = preset ? presetToFormValues(preset) : DEFAULT_FORM_VALUES
     form.reset(defaults, { keepDirty: false })
-    slugEditedRef.current = mode === "edit"
   }, [form, mode, preset])
 
   const watchedName = form.watch("name")
@@ -918,12 +1106,11 @@ function AgentPresetForm({
   const modelOptions = modelOptionsByProvider[providerValue] ?? []
 
   useEffect(() => {
-    if (mode === "create" && !slugEditedRef.current) {
-      form.setValue("slug", slugify(watchedName ?? "", "-"), {
-        shouldDirty: false,
-      })
+    const nextSlug = slugify(watchedName ?? "", "-")
+    if (form.getValues("slug") !== nextSlug) {
+      form.setValue("slug", nextSlug, { shouldDirty: false })
     }
-  }, [form, mode, watchedName])
+  }, [form, watchedName])
 
   useEffect(() => {
     if (
@@ -943,11 +1130,9 @@ function AgentPresetForm({
     if (mode === "edit" && preset) {
       const updated = await onUpdate(preset.id, payload)
       form.reset(presetToFormValues(updated))
-      slugEditedRef.current = true
     } else {
       const created = await onCreate(payload)
       form.reset(presetToFormValues(created))
-      slugEditedRef.current = true
     }
   })
 
@@ -959,154 +1144,212 @@ function AgentPresetForm({
       Boolean(form.watch("model_name")))
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center justify-between border-b px-4 py-3">
-        <div className="space-y-1">
-          <h2 className="text-sm font-semibold">
-            {mode === "edit"
-              ? (preset?.name ?? "Agent preset")
-              : "Create agent preset"}
-          </h2>
-          <p className="text-xs text-muted-foreground">
-            Configure prompts, tools, models, and approvals for reusable agents.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {mode === "edit" && onDelete ? (
-            <AlertDialog
-              open={deleteDialogOpen}
-              onOpenChange={(nextOpen) => {
-                if (isDeleting) {
-                  return
-                }
-                setDeleteDialogOpen(nextOpen)
-              }}
+    <Form {...form}>
+      <div className="flex h-full flex-col">
+        <div className="flex flex-wrap items-start justify-between gap-4 border-b p-6 py-4">
+          <div className="flex min-w-0 flex-1 flex-col gap-2">
+            <FormField
+              control={form.control}
+              name="slug"
+              render={({ field }) => (
+                <FormItem className="space-y-1">
+                  <FormLabel className="sr-only">Slug</FormLabel>
+                  <FormControl>
+                    <input type="hidden" {...field} value={field.value ?? ""} />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="name"
+              render={({ field }) => (
+                <FormItem className="space-y-1">
+                  <FormLabel className="sr-only">Agent name</FormLabel>
+                  <FormControl>
+                    <Input
+                      className="h-auto w-full border-none bg-transparent px-0 text-lg font-semibold leading-tight text-foreground shadow-none outline-none transition-none placeholder:text-muted-foreground/40 focus-visible:bg-transparent focus-visible:outline-none focus-visible:ring-0"
+                      placeholder="New agent preset"
+                      disabled={isSaving}
+                      {...field}
+                      value={field.value ?? ""}
+                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="description"
+              render={({ field }) => (
+                <FormItem>
+                  <FormControl>
+                    <AutoResizeTextarea
+                      value={field.value ?? ""}
+                      onChange={field.onChange}
+                      onBlur={field.onBlur}
+                      disabled={isSaving}
+                      placeholder="Short summary of what this agent does."
+                      className="w-full resize-none overflow-hidden border-none bg-transparent px-0 text-xs leading-tight text-foreground shadow-none outline-none transition-none placeholder:text-muted-foreground/40 focus-visible:bg-transparent focus-visible:outline-none focus-visible:ring-0"
+                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={() => handleSubmit()}
+              disabled={isSaving || !canSubmit}
+              className={cn(
+                "h-7 w-7 p-1 hover:bg-primary hover:text-primary-foreground",
+                canSubmit && !isSaving && "bg-primary text-primary-foreground"
+              )}
+              aria-label="Save agent preset"
             >
-              <AlertDialogTrigger asChild>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={isDeleting || isSaving}
-                >
-                  <Trash2 className="mr-2 size-4" />
-                  Delete
-                </Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Delete this agent preset?</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    This action permanently removes the preset and cannot be
-                    undone.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel disabled={isDeleting}>
-                    Cancel
-                  </AlertDialogCancel>
-                  <AlertDialogAction
-                    variant="destructive"
-                    onClick={handleConfirmDelete}
-                    disabled={isDeleting}
-                  >
-                    {isDeleting ? (
-                      <span className="flex items-center">
-                        <Loader2 className="mr-2 size-4 animate-spin" />
-                        Deleting...
-                      </span>
-                    ) : (
-                      "Delete"
-                    )}
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          ) : null}
-          <Button
-            type="button"
-            size="sm"
-            onClick={() => handleSubmit()}
-            disabled={isSaving || !canSubmit}
-          >
-            {isSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
-            {mode === "edit" ? "Save changes" : "Create preset"}
-          </Button>
+              {isSaving ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Save className="size-4" />
+              )}
+            </Button>
+            {mode === "edit" && onDelete ? (
+              <AlertDialog
+                open={deleteDialogOpen}
+                onOpenChange={(nextOpen) => {
+                  if (isDeleting) {
+                    return
+                  }
+                  setDeleteDialogOpen(nextOpen)
+                }}
+              >
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      disabled={isDeleting || isSaving}
+                      className="h-7 w-7 p-1"
+                      aria-label="Open agent actions menu"
+                    >
+                      <MoreVertical className="size-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <AlertDialogTrigger asChild>
+                      <DropdownMenuItem
+                        className="text-destructive focus:text-destructive"
+                        onSelect={(e) => {
+                          e.preventDefault()
+                          setDeleteDialogOpen(true)
+                        }}
+                      >
+                        <Trash2 className="mr-2 size-4" />
+                        Delete agent
+                      </DropdownMenuItem>
+                    </AlertDialogTrigger>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>
+                      Delete this agent preset?
+                    </AlertDialogTitle>
+                    <AlertDialogDescription>
+                      This action permanently removes the preset and cannot be
+                      undone.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel disabled={isDeleting}>
+                      Cancel
+                    </AlertDialogCancel>
+                    <AlertDialogAction
+                      variant="destructive"
+                      onClick={handleConfirmDelete}
+                      disabled={isDeleting}
+                    >
+                      {isDeleting ? (
+                        <span className="flex items-center">
+                          <Loader2 className="mr-2 size-4 animate-spin" />
+                          Deleting...
+                        </span>
+                      ) : (
+                        "Delete agent"
+                      )}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            ) : null}
+          </div>
         </div>
-      </div>
-      <ScrollArea className="flex-1">
-        <Form {...form}>
+        <ScrollArea className="flex-1">
           <form
             onSubmit={(event) => {
               event.preventDefault()
               void handleSubmit()
             }}
-            className="flex flex-col gap-8 px-6 py-6 text-sm"
+            className="flex flex-col gap-8 px-6 py-6 pb-20 text-sm"
           >
-            <section className="space-y-4">
-              <header className="space-y-1">
-                <h3 className="text-sm font-semibold">Preset details</h3>
-                <p className="text-xs text-muted-foreground">
-                  Basic metadata for identifying this agent across Tracecat.
-                </p>
-              </header>
+            <section className="space-y-6">
               <FormField
                 control={form.control}
-                name="name"
+                name="actions"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Name</FormLabel>
+                    <FormLabel>Allowed tools</FormLabel>
                     <FormControl>
-                      <Input
-                        placeholder="Security triage analyst"
-                        {...field}
+                      <MultiTagCommandInput
+                        value={field.value}
+                        onChange={field.onChange}
+                        suggestions={actionSuggestions}
+                        placeholder="+ Add tool"
+                        searchKeys={["label", "value", "description", "group"]}
+                        allowCustomTags
                         disabled={isSaving}
                       />
                     </FormControl>
-                    <FormMessage />
                   </FormItem>
                 )}
               />
               <FormField
                 control={form.control}
-                name="slug"
+                name="mcpIntegrations"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Slug</FormLabel>
+                    <FormLabel>Allowed MCP integrations</FormLabel>
                     <FormControl>
-                      <Input
-                        placeholder="security-triage-analyst"
-                        {...field}
-                        onChange={(event) => {
-                          slugEditedRef.current = true
-                          field.onChange(event)
-                        }}
+                      <MultiTagCommandInput
+                        value={field.value ?? []}
+                        onChange={(next) => field.onChange(next)}
+                        searchKeys={["label", "value"]}
+                        suggestions={(mcpIntegrations ?? []).map(
+                          (integration) => ({
+                            id: integration.providerId,
+                            label: integration.name,
+                            value: integration.providerId,
+                            description: integration.description || "Connected",
+                            icon: (
+                              <ProviderIcon
+                                providerId={integration.providerId}
+                                className="size-3 bg-transparent p-0 mx-1"
+                              />
+                            ),
+                          })
+                        )}
+                        placeholder={
+                          mcpIntegrationsIsLoading
+                            ? "Loading integrations..."
+                            : "Select MCP integrations"
+                        }
                         disabled={isSaving}
                       />
                     </FormControl>
-                    <FormDescription>
-                      Used in workflow YAML and API calls. Lowercase and
-                      hyphenated.
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="description"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Description</FormLabel>
-                    <FormControl>
-                      <Textarea
-                        placeholder="Short summary of what this agent does."
-                        rows={3}
-                        {...field}
-                        disabled={isSaving}
-                      />
-                    </FormControl>
-                    <FormMessage />
                   </FormItem>
                 )}
               />
@@ -1115,12 +1358,6 @@ function AgentPresetForm({
             <Separator />
 
             <section className="space-y-4">
-              <header className="space-y-1">
-                <h3 className="text-sm font-semibold">Model & runtime</h3>
-                <p className="text-xs text-muted-foreground">
-                  Choose the foundation model, optional overrides, and retries.
-                </p>
-              </header>
               <div className="grid gap-4 md:grid-cols-2">
                 <FormField
                   control={form.control}
@@ -1154,7 +1391,6 @@ function AgentPresetForm({
                           />
                         )}
                       </FormControl>
-                      <FormMessage />
                     </FormItem>
                   )}
                 />
@@ -1193,7 +1429,6 @@ function AgentPresetForm({
                           />
                         )}
                       </FormControl>
-                      <FormMessage />
                     </FormItem>
                   )}
                 />
@@ -1213,10 +1448,6 @@ function AgentPresetForm({
                           disabled={isSaving}
                         />
                       </FormControl>
-                      <FormDescription>
-                        Optional override for self-hosted or proxy deployments.
-                      </FormDescription>
-                      <FormMessage />
                     </FormItem>
                   )}
                 />
@@ -1234,179 +1465,10 @@ function AgentPresetForm({
                           disabled={isSaving}
                         />
                       </FormControl>
-                      <FormDescription>
-                        Number of automatic retries for transient errors.
-                      </FormDescription>
-                      <FormMessage />
                     </FormItem>
                   )}
                 />
               </div>
-            </section>
-
-            <Separator />
-
-            <section className="space-y-4">
-              <header className="space-y-1">
-                <h3 className="text-sm font-semibold">Prompt & behavior</h3>
-                <p className="text-xs text-muted-foreground">
-                  Define instructions and expected output shape.
-                </p>
-              </header>
-              <FormField
-                control={form.control}
-                name="instructions"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>System prompt</FormLabel>
-                    <FormControl>
-                      <div className="min-h-[300px] rounded-md border border-input bg-background [&_.simple-editor-content_.tiptap.ProseMirror.simple-editor]:p-3">
-                        <SimpleEditor
-                          value={field.value ?? ""}
-                          onChange={field.onChange}
-                          onBlur={field.onBlur}
-                          placeholder="You are a helpful analyst..."
-                          editable={!isSaving}
-                          className="min-h-[300px]"
-                        />
-                      </div>
-                    </FormControl>
-                    <FormDescription>
-                      Markdown supported. Provide context, goals, and
-                      guardrails.
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <div className="grid gap-4 md:grid-cols-2">
-                <FormField
-                  control={form.control}
-                  name="outputTypeKind"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Output type</FormLabel>
-                      <FormControl>
-                        <Select
-                          value={field.value}
-                          onValueChange={field.onChange}
-                          disabled={isSaving}
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="none">
-                              Free-form text (default)
-                            </SelectItem>
-                            <SelectItem value="preset">
-                              Structured primitive
-                            </SelectItem>
-                            <SelectItem value="json">
-                              Custom JSON schema
-                            </SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </FormControl>
-                      <FormDescription>
-                        Enforce structured responses when needed.
-                      </FormDescription>
-                    </FormItem>
-                  )}
-                />
-                {outputTypeKind === "preset" ? (
-                  <FormField
-                    control={form.control}
-                    name="outputTypePreset"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Preset type</FormLabel>
-                        <FormControl>
-                          <Select
-                            value={field.value ?? ""}
-                            onValueChange={field.onChange}
-                            disabled={isSaving}
-                          >
-                            <SelectTrigger>
-                              <SelectValue placeholder="Select type" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {PRESET_OUTPUT_TYPES.map((option) => (
-                                <SelectItem
-                                  key={option.value}
-                                  value={option.value}
-                                >
-                                  {option.label}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                ) : null}
-              </div>
-              {outputTypeKind === "json" ? (
-                <FormField
-                  control={form.control}
-                  name="outputTypeJson"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>JSON schema</FormLabel>
-                      <FormControl>
-                        <Textarea
-                          placeholder='{"type": "object", "properties": {...}}'
-                          rows={8}
-                          className="font-mono text-xs"
-                          {...field}
-                          disabled={isSaving}
-                        />
-                      </FormControl>
-                      <FormDescription>
-                        Provide a JSON schema describing the desired response.
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              ) : null}
-            </section>
-
-            <Separator />
-
-            <section className="space-y-4">
-              <header className="space-y-1">
-                <h3 className="text-sm font-semibold">Tools & approvals</h3>
-                <p className="text-xs text-muted-foreground">
-                  Declare tool access and manual approval requirements.
-                </p>
-              </header>
-              <FormField
-                control={form.control}
-                name="actions"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Allowed tools</FormLabel>
-                    <FormControl>
-                      <MultiTagCommandInput
-                        value={field.value}
-                        onChange={field.onChange}
-                        suggestions={actionSuggestions}
-                        placeholder="Add tools by action id"
-                        searchKeys={["label", "value", "description", "group"]}
-                        allowCustomTags
-                        disabled={isSaving}
-                      />
-                    </FormControl>
-                    <FormDescription>
-                      Registry action identifiers (e.g. core.http_request).
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
               <FormField
                 control={form.control}
                 name="namespaces"
@@ -1424,18 +1486,14 @@ function AgentPresetForm({
                         disabled={isSaving}
                       />
                     </FormControl>
-                    <FormDescription>
-                      Limit dynamic tool discovery to selected namespaces.
-                    </FormDescription>
-                    <FormMessage />
                   </FormItem>
                 )}
               />
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
-                  <h4 className="text-xs font-semibold uppercase text-muted-foreground">
+                  <label className="text-sm font-medium leading-none">
                     Approval rules
-                  </h4>
+                  </label>
                   <Button
                     type="button"
                     size="sm"
@@ -1499,7 +1557,6 @@ function AgentPresetForm({
                                       disabled={isSaving}
                                     />
                                   </FormControl>
-                                  <FormMessage />
                                 </FormItem>
                               )}
                             />
@@ -1523,7 +1580,6 @@ function AgentPresetForm({
                                       </span>
                                     </div>
                                   </FormControl>
-                                  <FormMessage />
                                 </FormItem>
                               )}
                             />
@@ -1549,198 +1605,136 @@ function AgentPresetForm({
 
             <Separator />
 
-            <section className="space-y-4">
-              <header className="space-y-1">
-                <h3 className="text-sm font-semibold">Advanced</h3>
-                <p className="text-xs text-muted-foreground">
-                  Configure MCP servers, custom headers, and model arguments.
-                </p>
-              </header>
+            <section className="space-y-6">
               <FormField
                 control={form.control}
-                name="mcpServerUrl"
+                name="instructions"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>MCP server URL</FormLabel>
+                    <FormLabel>System prompt</FormLabel>
                     <FormControl>
-                      <Input
-                        placeholder="https://mcp.example.com"
-                        value={field.value ?? ""}
-                        onChange={field.onChange}
-                        disabled={isSaving}
-                      />
+                      <div className="min-h-[300px] rounded-md border border-input bg-background [&_.simple-editor-content_.tiptap.ProseMirror.simple-editor]:p-3">
+                        <SimpleEditor
+                          value={field.value ?? ""}
+                          onChange={field.onChange}
+                          onBlur={field.onBlur}
+                          placeholder="You are a helpful analyst..."
+                          editable={!isSaving}
+                          className="min-h-[300px]"
+                        />
+                      </div>
                     </FormControl>
-                    <FormDescription>
-                      Optional Model Context Protocol server for toolsets.
-                    </FormDescription>
-                    <FormMessage />
                   </FormItem>
                 )}
               />
-              <KeyValueFieldArray
-                title="MCP headers"
-                description="Optional headers sent with MCP requests."
-                fields={headerFields}
-                control={form.control}
-                name="mcpServerHeaders"
-                onAdd={() => appendHeader({ key: "", value: "" })}
-                onRemove={removeHeader}
-                keyPlaceholder="X-API-KEY"
-                valuePlaceholder="secret"
-                disabled={isSaving}
-              />
-              <KeyValueFieldArray
-                title="Model settings"
-                description="Extra arguments passed to the model (temperature, max_tokens, etc)."
-                fields={settingsFields}
-                control={form.control}
-                name="modelSettings"
-                onAdd={() => appendSetting({ key: "", value: "" })}
-                onRemove={removeSetting}
-                keyPlaceholder="temperature"
-                valuePlaceholder="0.2"
-                disabled={isSaving}
-              />
+              <div className="grid gap-4 md:grid-cols-2">
+                <FormField
+                  control={form.control}
+                  name="outputTypeKind"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Output type</FormLabel>
+                      <FormControl>
+                        <Select
+                          value={field.value}
+                          onValueChange={field.onChange}
+                          disabled={isSaving}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="none">
+                              <div className="flex items-center gap-2">
+                                <Type className="size-4" />
+                                <span>Text only</span>
+                              </div>
+                            </SelectItem>
+                            <SelectItem value="data-type">
+                              <div className="flex items-center gap-2">
+                                <Box className="size-4" />
+                                <span>Structured</span>
+                              </div>
+                            </SelectItem>
+                            <SelectItem value="json">
+                              <div className="flex items-center gap-2">
+                                <Braces className="size-4" />
+                                <span>JSON schema</span>
+                              </div>
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </FormControl>
+                    </FormItem>
+                  )}
+                />
+                {outputTypeKind === "data-type" ? (
+                  <FormField
+                    control={form.control}
+                    name="outputTypeDataType"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Data type</FormLabel>
+                        <FormControl>
+                          <Select
+                            value={field.value ?? ""}
+                            onValueChange={field.onChange}
+                            disabled={isSaving}
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select type" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {DATA_TYPE_OUTPUT_TYPES.map((option) => {
+                                const Icon = option.icon
+                                return (
+                                  <SelectItem
+                                    key={option.value}
+                                    value={option.value}
+                                  >
+                                    <div className="flex items-center gap-2">
+                                      <Icon className="size-4" />
+                                      <span>{option.label}</span>
+                                    </div>
+                                  </SelectItem>
+                                )
+                              })}
+                            </SelectContent>
+                          </Select>
+                        </FormControl>
+                      </FormItem>
+                    )}
+                  />
+                ) : null}
+              </div>
+              {outputTypeKind === "json" ? (
+                <FormField
+                  control={form.control}
+                  name="outputTypeJson"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>JSON schema</FormLabel>
+                      <FormDescription>
+                        Define a JSON schema for structured output.
+                      </FormDescription>
+                      <FormControl>
+                        <CodeEditor
+                          value={field.value ?? ""}
+                          onChange={(value) => field.onChange(value)}
+                          language="json"
+                          readOnly={isSaving}
+                          className="min-h-[200px]"
+                        />
+                      </FormControl>
+                    </FormItem>
+                  )}
+                />
+              ) : null}
             </section>
           </form>
-        </Form>
-      </ScrollArea>
-    </div>
-  )
-}
-
-function KeyValueFieldArray({
-  title,
-  description,
-  fields,
-  control,
-  name,
-  onAdd,
-  onRemove,
-  keyPlaceholder,
-  valuePlaceholder,
-  disabled,
-}: {
-  title: string
-  description?: string
-  fields: { id: string }[]
-  control: Control<AgentPresetFormValues>
-  name: "mcpServerHeaders" | "modelSettings"
-  onAdd: () => void
-  onRemove: (index: number) => void
-  keyPlaceholder?: string
-  valuePlaceholder?: string
-  disabled?: boolean
-}) {
-  const listId = useId()
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div>
-          <h4 className="text-xs font-semibold uppercase text-muted-foreground">
-            {title}
-          </h4>
-          {description ? (
-            <p className="text-xs text-muted-foreground">{description}</p>
-          ) : null}
-        </div>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          onClick={onAdd}
-          disabled={disabled}
-        >
-          <Plus className="mr-2 size-4" />
-          Add
-        </Button>
+        </ScrollArea>
       </div>
-      {fields.length === 0 ? (
-        <p className="rounded-md border border-dashed px-3 py-4 text-xs text-muted-foreground">
-          No entries yet.
-        </p>
-      ) : (
-        <div className="space-y-2">
-          {fields.map((field, index) => (
-            <div
-              key={field.id}
-              className="grid gap-2 rounded-md border px-3 py-3 md:grid-cols-[1fr_1fr_auto]"
-            >
-              <FormField
-                control={control}
-                name={`${name}.${index}.key`}
-                render={({ field: innerField }) => (
-                  <FormItem>
-                    <FormLabel className="text-xs uppercase text-muted-foreground">
-                      Key
-                    </FormLabel>
-                    <FormControl>
-                      <Input
-                        placeholder={keyPlaceholder}
-                        value={String(innerField.value ?? "")}
-                        onChange={innerField.onChange}
-                        onBlur={innerField.onBlur}
-                        name={innerField.name}
-                        ref={innerField.ref}
-                        disabled={disabled}
-                        list={`${listId}-${name}-key`}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={control}
-                name={`${name}.${index}.value`}
-                render={({ field: innerField }) => (
-                  <FormItem>
-                    <FormLabel className="text-xs uppercase text-muted-foreground">
-                      Value
-                    </FormLabel>
-                    <FormControl>
-                      <Input
-                        placeholder={valuePlaceholder}
-                        value={String(innerField.value ?? "")}
-                        onChange={innerField.onChange}
-                        onBlur={innerField.onBlur}
-                        name={innerField.name}
-                        ref={innerField.ref}
-                        disabled={disabled}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <div className="flex items-end justify-end">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => onRemove(index)}
-                  disabled={disabled}
-                  aria-label={`Remove ${title}`}
-                >
-                  <Trash2 className="size-4" />
-                </Button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-      <datalist id={`${listId}-${name}-key`}>
-        {name === "modelSettings" ? (
-          <>
-            <option value="temperature" />
-            <option value="max_tokens" />
-            <option value="top_p" />
-            <option value="response_format" />
-          </>
-        ) : null}
-      </datalist>
-    </div>
+    </Form>
   )
 }
 
@@ -1753,6 +1747,7 @@ function AgentPresetBuilderChatPane({
 }) {
   const presetId = preset?.id
   const [createdChatId, setCreatedChatId] = useState<string | null>(null)
+  const [resetDialogOpen, setResetDialogOpen] = useState(false)
 
   const {
     ready: chatReady,
@@ -1812,19 +1807,11 @@ function AgentPresetBuilderChatPane({
     if (!canStartChat) {
       return
     }
+    setResetDialogOpen(false)
     await handleStartChat(true)
   }
 
   const renderBody = () => {
-    if (!presetId) {
-      return (
-        <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-xs text-muted-foreground">
-          <MessageCircle className="size-5" />
-          <p>Save this preset to chat with the builder assistant.</p>
-        </div>
-      )
-    }
-
     if (chatReadyLoading) {
       return (
         <div className="flex h-full items-center justify-center">
@@ -1871,22 +1858,31 @@ function AgentPresetBuilderChatPane({
 
     if (!activeChatId) {
       return (
-        <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-xs text-muted-foreground">
-          <MessageCircle className="size-5 text-muted-foreground" />
-          <p>
-            Ask the assistant for prompt, tool, or approval suggestions to get
-            started.
-          </p>
-          <Button
-            size="sm"
-            onClick={() => void handleStartChat()}
-            disabled={createChatPending || !canStartChat}
-          >
-            {createChatPending ? (
-              <Loader2 className="mr-2 size-4 animate-spin" />
-            ) : null}
-            Start assistant
-          </Button>
+        <div className="flex h-full items-center justify-center px-4">
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <MessageCircle />
+              </EmptyMedia>
+              <EmptyTitle>Builder assistant</EmptyTitle>
+              <EmptyDescription>
+                Save the preset name and model provider to activate the builder
+                assistant.
+              </EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Button
+                size="sm"
+                onClick={() => void handleStartChat()}
+                disabled={createChatPending || !canStartChat}
+              >
+                {createChatPending ? (
+                  <Loader2 className="mr-2 size-4 animate-spin" />
+                ) : null}
+                Start assistant
+              </Button>
+            </EmptyContent>
+          </Empty>
         </div>
       )
     }
@@ -1940,19 +1936,39 @@ function AgentPresetBuilderChatPane({
           <h3 className="text-sm font-semibold">Builder assistant</h3>
         </div>
         <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => void handleResetChat()}
-            disabled={createChatPending || !canStartChat}
-          >
-            {createChatPending ? (
-              <Loader2 className="mr-2 size-4 animate-spin" />
-            ) : (
-              <RotateCcw className="mr-2 size-4" />
-            )}
-            Reset assistant
-          </Button>
+          <AlertDialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
+            <AlertDialogTrigger asChild>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={createChatPending || !canStartChat}
+              >
+                {createChatPending ? (
+                  <Loader2 className="mr-2 size-4 animate-spin" />
+                ) : (
+                  <RotateCcw className="mr-2 size-4" />
+                )}
+                Reset assistant
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>
+                  Reset the builder assistant?
+                </AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will start a new conversation. Your current chat history
+                  will no longer be accessible.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={() => void handleResetChat()}>
+                  Reset assistant
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </div>
       </div>
       <div className="flex-1 min-h-0">{renderBody()}</div>
@@ -1976,10 +1992,10 @@ function presetToFormValues(preset: AgentPresetRead): AgentPresetFormValues {
     base_url: preset.base_url ?? "",
     outputTypeKind: outputType
       ? typeof outputType === "string"
-        ? "preset"
+        ? "data-type"
         : "json"
       : "none",
-    outputTypePreset: typeof outputType === "string" ? outputType : "",
+    outputTypeDataType: typeof outputType === "string" ? outputType : "",
     outputTypeJson:
       outputType && typeof outputType === "object"
         ? JSON.stringify(outputType, null, 2)
@@ -1994,23 +2010,7 @@ function presetToFormValues(preset: AgentPresetRead): AgentPresetFormValues {
           })
         )
       : [],
-    mcpServerUrl: preset.mcp_server_url ?? "",
-    mcpServerHeaders: preset.mcp_server_headers
-      ? Object.entries(preset.mcp_server_headers).map(
-          ([key, value]): KeyValueFormValue => ({
-            key,
-            value: value ?? "",
-          })
-        )
-      : [],
-    modelSettings: preset.model_settings
-      ? Object.entries(preset.model_settings).map(
-          ([key, value]): KeyValueFormValue => ({
-            key,
-            value: typeof value === "string" ? value : JSON.stringify(value),
-          })
-        )
-      : [],
+    mcpIntegrations: preset.mcp_integrations ?? [],
     retries: preset.retries ?? DEFAULT_RETRIES,
   }
 }
@@ -2019,14 +2019,11 @@ function formValuesToPayload(values: AgentPresetFormValues): AgentPresetCreate {
   const outputType =
     values.outputTypeKind === "none"
       ? null
-      : values.outputTypeKind === "preset"
-        ? (values.outputTypePreset ?? null)
+      : values.outputTypeKind === "data-type"
+        ? (values.outputTypeDataType ?? null)
         : values.outputTypeJson
           ? JSON.parse(values.outputTypeJson)
           : null
-
-  const headers = keyValueArrayToRecord<string>(values.mcpServerHeaders)
-  const settings = keyValueArrayToRecord(values.modelSettings, parseMaybeJson)
 
   return {
     name: values.name.trim(),
@@ -2042,10 +2039,9 @@ function formValuesToPayload(values: AgentPresetFormValues): AgentPresetCreate {
     output_type: outputType ?? null,
     actions: values.actions.length > 0 ? values.actions : null,
     namespaces: values.namespaces.length > 0 ? values.namespaces : null,
+    mcp_integrations:
+      values.mcpIntegrations.length > 0 ? values.mcpIntegrations : null,
     tool_approvals: toToolApprovalMap(values.toolApprovals),
-    mcp_server_url: normalizeOptional(values.mcpServerUrl),
-    mcp_server_headers: headers ?? null,
-    model_settings: settings,
     retries: values.retries,
   }
 }
@@ -2073,29 +2069,4 @@ function toToolApprovalMap(
   }
 
   return Object.fromEntries(entries.map(({ tool, allow }) => [tool, allow]))
-}
-
-function keyValueArrayToRecord<T = string>(
-  entries: KeyValueFormValue[],
-  transform: (value: string) => T = (value) => value as T
-): Record<string, T> | null {
-  const result: Record<string, T> = {}
-  for (const entry of entries) {
-    const key = entry.key.trim()
-    if (!key) continue
-    result[key] = transform(entry.value ?? "")
-  }
-  return Object.keys(result).length > 0 ? result : null
-}
-
-function parseMaybeJson(value: string) {
-  const trimmed = value.trim()
-  if (!trimmed) {
-    return ""
-  }
-  try {
-    return JSON.parse(trimmed)
-  } catch (_error) {
-    return trimmed
-  }
 }

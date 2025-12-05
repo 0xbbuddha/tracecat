@@ -28,7 +28,7 @@ export type ActionCreate = {
   workflow_id: string
   type: string
   title: string
-  description?: string | null
+  description?: string
   inputs?: string
   control_flow?: ActionControlFlow | null
   is_interactive?: boolean
@@ -202,13 +202,7 @@ export type AgentPresetCreate = {
   tool_approvals?: {
     [key: string]: boolean
   } | null
-  mcp_server_url?: string | null
-  mcp_server_headers?: {
-    [key: string]: string
-  } | null
-  model_settings?: {
-    [key: string]: unknown
-  } | null
+  mcp_integrations?: Array<string> | null
   retries?: number
   name: string
   slug?: string | null
@@ -229,16 +223,10 @@ export type AgentPresetRead = {
   tool_approvals?: {
     [key: string]: boolean
   } | null
-  mcp_server_url?: string | null
-  mcp_server_headers?: {
-    [key: string]: string
-  } | null
-  model_settings?: {
-    [key: string]: unknown
-  } | null
+  mcp_integrations?: Array<string> | null
   retries?: number
   id: string
-  owner_id: string
+  workspace_id: string
   name: string
   slug: string
   created_at: string
@@ -250,7 +238,7 @@ export type AgentPresetRead = {
  */
 export type AgentPresetReadMinimal = {
   id: string
-  owner_id: string
+  workspace_id: string
   name: string
   slug: string
   description: string | null
@@ -275,13 +263,7 @@ export type AgentPresetUpdate = {
   tool_approvals?: {
     [key: string]: boolean
   } | null
-  mcp_server_url?: string | null
-  mcp_server_headers?: {
-    [key: string]: string
-  } | null
-  model_settings?: {
-    [key: string]: unknown
-  } | null
+  mcp_integrations?: Array<string> | null
   retries?: number | null
 }
 
@@ -513,9 +495,6 @@ export type AttachmentDeletedEventRead = {
   created_at: string
 }
 
-/**
- * A URL to an audio file.
- */
 export type AudioUrl = {
   url: string
   force_download?: boolean
@@ -574,9 +553,6 @@ export type AuthSettingsUpdate = {
   auth_session_expire_time_seconds?: number
 }
 
-/**
- * Binary content, e.g. an audio or image file.
- */
 export type BinaryContent = {
   data: Blob | File
   media_type:
@@ -597,6 +573,7 @@ export type BinaryContent = {
     | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     | "text/html"
     | "text/markdown"
+    | "application/msword"
     | "application/vnd.ms-excel"
     | string
   vendor_metadata?: {
@@ -675,7 +652,6 @@ export type Body_workflows_create_workflow = {
 }
 
 /**
- * An event indicating the start to a call to a built-in tool.
  * @deprecated
  */
 export type BuiltinToolCallEvent = {
@@ -683,9 +659,6 @@ export type BuiltinToolCallEvent = {
   event_kind?: "builtin_tool_call"
 }
 
-/**
- * A tool call to a built-in tool.
- */
 export type BuiltinToolCallPart = {
   tool_name: string
   args?:
@@ -696,12 +669,14 @@ export type BuiltinToolCallPart = {
     | null
   tool_call_id?: string
   id?: string | null
+  provider_details?: {
+    [key: string]: unknown
+  } | null
   provider_name?: string | null
   part_kind?: "builtin-tool-call"
 }
 
 /**
- * An event indicating the result of a built-in tool call.
  * @deprecated
  */
 export type BuiltinToolResultEvent = {
@@ -709,9 +684,6 @@ export type BuiltinToolResultEvent = {
   event_kind?: "builtin_tool_result"
 }
 
-/**
- * A tool return message from a built-in tool.
- */
 export type BuiltinToolReturnPart = {
   tool_name: string
   content: unknown
@@ -719,8 +691,18 @@ export type BuiltinToolReturnPart = {
   metadata?: unknown
   timestamp?: string
   provider_name?: string | null
+  provider_details?: {
+    [key: string]: unknown
+  } | null
   part_kind?: "builtin-tool-return"
 }
+
+export type CachePoint = {
+  kind?: "cache-point"
+  ttl?: "5m" | "1h"
+}
+
+export type ttl = "5m" | "1h"
 
 /**
  * Model for attachment download URL response.
@@ -790,16 +772,6 @@ export type CaseCreate = {
   payload?: {
     [key: string]: unknown
   } | null
-}
-
-export type CaseCustomFieldRead = {
-  id: string
-  type: SqlType
-  description: string
-  nullable: boolean
-  default: string | null
-  reserved: boolean
-  value: unknown
 }
 
 /**
@@ -1050,6 +1022,21 @@ export type CaseFieldRead = {
   nullable: boolean
   default: string | null
   reserved: boolean
+  options?: Array<string> | null
+  value: unknown
+}
+
+/**
+ * Minimal read model for a case field.
+ */
+export type CaseFieldReadMinimal = {
+  id: string
+  type: SqlType
+  description: string
+  nullable: boolean
+  default: string | null
+  reserved: boolean
+  options?: Array<string> | null
 }
 
 /**
@@ -1108,7 +1095,7 @@ export type CaseRead = {
   priority: CasePriority
   severity: CaseSeverity
   description: string
-  fields: Array<CaseCustomFieldRead>
+  fields: Array<CaseFieldRead>
   assignee?: UserRead | null
   payload: {
     [key: string]: unknown
@@ -1190,6 +1177,9 @@ export type CaseTaskCreate = {
   status?: CaseTaskStatus
   assignee_id?: string | null
   workflow_id?: string | null
+  default_trigger_values?: {
+    [key: string]: unknown
+  } | null
 }
 
 export type CaseTaskRead = {
@@ -1203,6 +1193,9 @@ export type CaseTaskRead = {
   status: CaseTaskStatus
   assignee?: UserRead | null
   workflow_id: string | null
+  default_trigger_values?: {
+    [key: string]: unknown
+  } | null
 }
 
 /**
@@ -1217,6 +1210,9 @@ export type CaseTaskUpdate = {
   status?: CaseTaskStatus | null
   assignee_id?: string | null
   workflow_id?: string | null
+  default_trigger_values?: {
+    [key: string]: unknown
+  } | null
 }
 
 export type CaseUpdate = {
@@ -1282,7 +1278,11 @@ export type ChatCreate = {
 /**
  * The type of entity associated with a chat.
  */
-export type ChatEntity = "case" | "agent_preset" | "agent_preset_builder"
+export type ChatEntity =
+  | "case"
+  | "agent_preset"
+  | "agent_preset_builder"
+  | "copilot"
 
 /**
  * Model for chat metadata with a single message.
@@ -1743,9 +1743,6 @@ export type DataUIPart = {
   data: unknown
 }
 
-/**
- * The URL of the document.
- */
 export type DocumentUrl = {
   url: string
   force_download?: boolean
@@ -1976,7 +1973,6 @@ export type ExpressionValidationResponse = {
  */
 export type FeatureFlag =
   | "git-sync"
-  | "agent-sandbox"
   | "agent-approvals"
   | "agent-presets"
   | "case-durations"
@@ -2015,13 +2011,13 @@ export type FieldDiff = {
   new: unknown
 }
 
-/**
- * A file response from a model.
- */
 export type FilePart = {
   content: BinaryContent
   id?: string | null
   provider_name?: string | null
+  provider_details?: {
+    [key: string]: unknown
+  } | null
   part_kind?: "file"
 }
 
@@ -2057,30 +2053,30 @@ export type FolderDirectoryItem = {
   id: string
   name: string
   path: string
-  owner_id: string
+  workspace_id: string
   created_at: string
   updated_at: string
   type: "folder"
   num_items: number
 }
 
-/**
- * An event indicating the start to a call to a function tool.
- */
 export type FunctionToolCallEvent = {
   part: ToolCallPart
   event_kind?: "function_tool_call"
 }
 
-/**
- * An event indicating the result of a function tool call.
- */
 export type FunctionToolResultEvent = {
   result: ToolReturnPart | RetryPromptPart
   content?:
     | string
     | Array<
-        string | ImageUrl | AudioUrl | DocumentUrl | VideoUrl | BinaryContent
+        | string
+        | ImageUrl
+        | AudioUrl
+        | DocumentUrl
+        | VideoUrl
+        | BinaryContent
+        | CachePoint
       >
     | null
   event_kind?: "function_tool_result"
@@ -2216,9 +2212,6 @@ export type HTTPValidationError = {
   detail?: Array<ValidationError>
 }
 
-/**
- * A URL to an image.
- */
 export type ImageUrl = {
   url: string
   force_download?: boolean
@@ -2469,6 +2462,82 @@ export type InteractionType = "approval" | "response"
 
 export type JoinStrategy = "any" | "all"
 
+/**
+ * Authentication type for MCP integrations.
+ */
+export type MCPAuthType = "OAUTH2" | "CUSTOM" | "NONE"
+
+/**
+ * Request model for creating an MCP integration.
+ */
+export type MCPIntegrationCreate = {
+  /**
+   * MCP integration name
+   */
+  name: string
+  /**
+   * Optional description
+   */
+  description?: string | null
+  /**
+   * MCP server endpoint URL
+   */
+  server_uri: string
+  /**
+   * Authentication type
+   */
+  auth_type: MCPAuthType
+  /**
+   * OAuth integration ID (required for oauth2 auth_type)
+   */
+  oauth_integration_id?: string | null
+  /**
+   * Custom credentials (API key, bearer token, or JSON headers) for custom auth_type
+   */
+  custom_credentials?: string | null
+}
+
+/**
+ * Response model for MCP integration.
+ */
+export type MCPIntegrationRead = {
+  id: string
+  workspace_id: string
+  name: string
+  description: string | null
+  slug: string
+  server_uri: string
+  auth_type: MCPAuthType
+  oauth_integration_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * Request model for updating an MCP integration.
+ */
+export type MCPIntegrationUpdate = {
+  name?: string | null
+  description?: string | null
+  server_uri?: string | null
+  auth_type?: MCPAuthType | null
+  oauth_integration_id?: string | null
+  /**
+   * Custom credentials (API key, bearer token, or JSON headers) for custom auth_type
+   */
+  custom_credentials?: string | null
+}
+
+/**
+ * Configuration for an MCP server.
+ */
+export type MCPServerConfig = {
+  url: string
+  headers: {
+    [key: string]: string
+  }
+}
+
 export type ModelConfig = {
   /**
    * The name of the model. This is used to identify the model in the system.
@@ -2513,20 +2582,18 @@ export type ModelCredentialUpdate = {
   }
 }
 
-/**
- * A request generated by Pydantic AI and sent to a model, e.g. a message from the Pydantic AI app to the model.
- */
 export type ModelRequest = {
   parts: Array<
     SystemPromptPart | UserPromptPart | ToolReturnPart | RetryPromptPart
   >
   instructions?: string | null
   kind?: "request"
+  run_id?: string | null
+  metadata?: {
+    [key: string]: unknown
+  } | null
 }
 
-/**
- * A response from a model, e.g. a message from the model to the Pydantic AI app.
- */
 export type ModelResponse = {
   parts: Array<
     | TextPart
@@ -2552,6 +2619,10 @@ export type ModelResponse = {
     | "tool_call"
     | "error"
     | null
+  run_id?: string | null
+  metadata?: {
+    [key: string]: unknown
+  } | null
 }
 
 export type ModelSecretConfig = {
@@ -2597,6 +2668,24 @@ export type OrgMemberRead = {
   last_login_at: string | null
 }
 
+/**
+ * Read schema for organization-scoped secrets.
+ */
+export type OrganizationSecretRead = {
+  id: string
+  type: SecretType
+  name: string
+  description?: string | null
+  encrypted_keys: Blob | File
+  environment: string
+  tags?: {
+    [key: string]: string
+  } | null
+  created_at: string
+  updated_at: string
+  organization_id: string
+}
+
 export type OutputType =
   | "bool"
   | "float"
@@ -2616,6 +2705,26 @@ export type PartDeltaEvent = {
   event_kind?: "part_delta"
 }
 
+export type PartEndEvent = {
+  index: number
+  part:
+    | TextPart
+    | ToolCallPart
+    | BuiltinToolCallPart
+    | BuiltinToolReturnPart
+    | ThinkingPart
+    | FilePart
+  next_part_kind?:
+    | "text"
+    | "thinking"
+    | "tool-call"
+    | "builtin-tool-call"
+    | "builtin-tool-return"
+    | "file"
+    | null
+  event_kind?: "part_end"
+}
+
 export type PartStartEvent = {
   index: number
   part:
@@ -2625,6 +2734,14 @@ export type PartStartEvent = {
     | BuiltinToolReturnPart
     | ThinkingPart
     | FilePart
+  previous_part_kind?:
+    | "text"
+    | "thinking"
+    | "tool-call"
+    | "builtin-tool-call"
+    | "builtin-tool-return"
+    | "file"
+    | null
   event_kind?: "part_start"
 }
 
@@ -3288,20 +3405,6 @@ export type ResponseInteraction = {
   timeout?: number | null
 }
 
-/**
- * A message back to a model asking it to try again.
- *
- * This can be sent for a number of reasons:
- *
- * * Pydantic validation of tool arguments failed, here content is derived from a Pydantic
- * [`ValidationError`][pydantic_core.ValidationError]
- * * a tool raised a [`ModelRetry`][pydantic_ai.exceptions.ModelRetry] exception
- * * no tool was found for the tool name
- * * the model returned plain text when a structured response was expected
- * * Pydantic validation of a structured response failed, here content is derived from a Pydantic
- * [`ValidationError`][pydantic_core.ValidationError]
- * * an output validator raised a [`ModelRetry`][pydantic_ai.exceptions.ModelRetry] exception
- */
 export type RetryPromptPart = {
   content: Array<ErrorDetails> | string
   tool_name?: string | null
@@ -3427,39 +3530,6 @@ export type SAMLSettingsUpdate = {
   saml_idp_metadata_url?: string | null
 }
 
-export type Schedule = {
-  created_at?: string
-  updated_at?: string
-  owner_id: string
-  id?: string
-  status?: string
-  cron?: string | null
-  inputs?: {
-    [key: string]: unknown
-  }
-  /**
-   * ISO 8601 duration string
-   */
-  every?: string | null
-  /**
-   * ISO 8601 duration string
-   */
-  offset?: string | null
-  /**
-   * ISO 8601 datetime string
-   */
-  start_at?: string | null
-  /**
-   * ISO 8601 datetime string
-   */
-  end_at?: string | null
-  /**
-   * The maximum number of seconds to wait for the workflow to complete
-   */
-  timeout?: number | null
-  workflow_id: string
-}
-
 export type ScheduleCreate = {
   workflow_id: string
   inputs?: {
@@ -3490,6 +3560,24 @@ export type ScheduleCreate = {
 }
 
 export type status2 = "online" | "offline"
+
+export type ScheduleRead = {
+  id: string
+  workspace_id: string
+  created_at: string
+  updated_at: string
+  workflow_id: string
+  inputs?: {
+    [key: string]: unknown
+  } | null
+  cron?: string | null
+  every?: string | null
+  offset?: string | null
+  start_at?: string | null
+  end_at?: string | null
+  timeout?: number | null
+  status: "online" | "offline"
+}
 
 export type ScheduleSearch = {
   workflow_id?: string | null
@@ -3549,6 +3637,9 @@ export type SecretKeyValue = {
   value: string
 }
 
+/**
+ * Read schema for workspace-scoped secrets.
+ */
 export type SecretRead = {
   id: string
   type: SecretType
@@ -3559,9 +3650,9 @@ export type SecretRead = {
   tags?: {
     [key: string]: string
   } | null
-  owner_id: string
   created_at: string
   updated_at: string
+  workspace_id: string
 }
 
 export type SecretReadMinimal = {
@@ -3746,11 +3837,6 @@ export type SyntaxToken = {
   end: number
 }
 
-/**
- * A system prompt, generally written by the application developer.
- *
- * This gives the model context and guidance on how to respond.
- */
 export type SystemPromptPart = {
   content: string
   timestamp?: string
@@ -4278,20 +4364,20 @@ export type TextArea = {
   placeholder?: string
 }
 
-/**
- * A plain text response from a model.
- */
 export type TextPart = {
   content: string
   id?: string | null
+  provider_details?: {
+    [key: string]: unknown
+  } | null
   part_kind?: "text"
 }
 
-/**
- * A partial update (delta) for a `TextPart` to append new text content.
- */
 export type TextPartDelta = {
   content_delta: string
+  provider_details?: {
+    [key: string]: unknown
+  } | null
   part_delta_kind?: "text"
 }
 
@@ -4309,14 +4395,14 @@ export type TextUIPart = {
   }
 }
 
-/**
- * A thinking response from a model.
- */
 export type ThinkingPart = {
   content: string
   id?: string | null
   signature?: string | null
   provider_name?: string | null
+  provider_details?: {
+    [key: string]: unknown
+  } | null
   part_kind?: "thinking"
 }
 
@@ -4324,6 +4410,9 @@ export type ThinkingPartDelta = {
   content_delta?: string | null
   signature_delta?: string | null
   provider_name?: string | null
+  provider_details?: {
+    [key: string]: unknown
+  } | null
   part_delta_kind?: "thinking"
 }
 
@@ -4340,9 +4429,6 @@ export type ToolApproved = {
   kind?: "tool-approved"
 }
 
-/**
- * A tool call from a model.
- */
 export type ToolCallPart = {
   tool_name: string
   args?:
@@ -4353,6 +4439,9 @@ export type ToolCallPart = {
     | null
   tool_call_id?: string
   id?: string | null
+  provider_details?: {
+    [key: string]: unknown
+  } | null
   part_kind?: "tool-call"
 }
 
@@ -4365,40 +4454,35 @@ export type ToolCallPartDelta = {
       }
     | null
   tool_call_id?: string | null
+  provider_details?: {
+    [key: string]: unknown
+  } | null
   part_delta_kind?: "tool_call"
 }
 
-/**
- * Indicates that a tool call has been denied and that a denial message should be returned to the model.
- */
 export type ToolDenied = {
   message?: string
   kind?: "tool-denied"
 }
 
-/**
- * A structured return value for tools that need to provide both a return value and custom content to the model.
- *
- * This class allows tools to return complex responses that include:
- * - A return value for actual tool return
- * - Custom content (including multi-modal content) to be sent to the model as a UserPromptPart
- * - Optional metadata for application use
- */
 export type ToolReturn = {
   return_value: unknown
   content?:
     | string
     | Array<
-        string | ImageUrl | AudioUrl | DocumentUrl | VideoUrl | BinaryContent
+        | string
+        | ImageUrl
+        | AudioUrl
+        | DocumentUrl
+        | VideoUrl
+        | BinaryContent
+        | CachePoint
       >
     | null
   metadata?: unknown
   kind?: "tool-return"
 }
 
-/**
- * A tool return message, this encodes the result of running a tool.
- */
 export type ToolReturnPart = {
   tool_name: string
   content: unknown
@@ -4541,17 +4625,17 @@ export type UserCreate = {
   last_name?: string | null
 }
 
-/**
- * A user prompt, generally written by the end user.
- *
- * Content comes from the `user_prompt` parameter of [`Agent.run`][pydantic_ai.agent.AbstractAgent.run],
- * [`Agent.run_sync`][pydantic_ai.agent.AbstractAgent.run_sync], and [`Agent.run_stream`][pydantic_ai.agent.AbstractAgent.run_stream].
- */
 export type UserPromptPart = {
   content:
     | string
     | Array<
-        string | ImageUrl | AudioUrl | DocumentUrl | VideoUrl | BinaryContent
+        | string
+        | ImageUrl
+        | AudioUrl
+        | DocumentUrl
+        | VideoUrl
+        | BinaryContent
+        | CachePoint
       >
   timestamp?: string
   part_kind?: "user-prompt"
@@ -4637,7 +4721,7 @@ export type VariableRead = {
   tags: {
     [key: string]: string
   } | null
-  owner_id: string
+  workspace_id: string
   created_at: string
   updated_at: string
 }
@@ -4687,9 +4771,6 @@ export type VercelChatRequest = {
   base_url?: string | null
 }
 
-/**
- * A URL to a video.
- */
 export type VideoUrl = {
   url: string
   force_download?: boolean
@@ -4746,15 +4827,12 @@ export type WebhookCreate = {
 export type WebhookMethod = "GET" | "POST"
 
 export type WebhookRead = {
-  created_at?: string
-  updated_at?: string
-  owner_id: string
   id: string
   secret: string
   status: WebhookStatus
   entrypoint_ref?: string | null
   allowlisted_cidrs?: Array<string>
-  filters: {
+  filters?: {
     [key: string]: unknown
   }
   /**
@@ -4792,38 +4870,18 @@ export type WorkflowCommitResponse = {
 export type status3 = "success" | "failure"
 
 /**
- * A workflow definition.
- *
- * This is the underlying representation/snapshot of a workflow in the system, which
- * can directly execute in the runner.
- *
- * Shoulds
- * -------
- * 1. Be convertible into a Workspace Workflow + Acitons
- * 2. Be convertible into a YAML DSL
- * 3. Be able to be versioned
- *
- * Shouldn'ts
- * ----------
- * 1. Have any stateful information
- *
- * Relationships
- * -------------
- * - 1 Workflow to many WorkflowDefinitions
+ * API response model for persisted workflow definitions.
  */
-export type WorkflowDefinition = {
-  created_at?: string
-  updated_at?: string
-  owner_id: string
-  id?: string
-  /**
-   * DSL spec version
-   */
+export type WorkflowDefinitionRead = {
+  id: string
+  workflow_id: string | null
+  workspace_id: string
   version: number
-  workflow_id: string
-  content: {
+  content?: {
     [key: string]: unknown
-  }
+  } | null
+  created_at: string
+  updated_at: string
 }
 
 export type WorkflowDefinitionReadMinimal = {
@@ -5122,7 +5180,7 @@ export type WorkflowFolderRead = {
   id: string
   name: string
   path: string
-  owner_id: string
+  workspace_id: string
   created_at: string
   updated_at: string
 }
@@ -5146,10 +5204,10 @@ export type WorkflowRead = {
   object: {
     [key: string]: unknown
   } | null
-  owner_id: string
+  workspace_id: string
   version?: number | null
   webhook: WebhookRead
-  schedules: Array<Schedule>
+  schedules: Array<ScheduleRead>
   entrypoint: string | null
   expects?: {
     [key: string]: ExpectedField
@@ -5234,7 +5292,7 @@ export type WorkflowUpdate = {
 export type WorkspaceCreate = {
   name: string
   settings?: WorkspaceSettingsUpdate | null
-  owner_id?: string
+  organization_id?: string
 }
 
 export type WorkspaceMember = {
@@ -5265,7 +5323,7 @@ export type WorkspaceRead = {
   id: string
   name: string
   settings?: WorkspaceSettingsRead | null
-  owner_id: string
+  organization_id: string
 }
 
 export type WorkspaceReadMinimal = {
@@ -5535,7 +5593,8 @@ export type WorkflowsListWorkflowDefinitionsData = {
   workspaceId: string
 }
 
-export type WorkflowsListWorkflowDefinitionsResponse = Array<WorkflowDefinition>
+export type WorkflowsListWorkflowDefinitionsResponse =
+  Array<WorkflowDefinitionRead>
 
 export type WorkflowsGetWorkflowDefinitionData = {
   version?: number | null
@@ -5543,14 +5602,14 @@ export type WorkflowsGetWorkflowDefinitionData = {
   workspaceId: string
 }
 
-export type WorkflowsGetWorkflowDefinitionResponse = WorkflowDefinition
+export type WorkflowsGetWorkflowDefinitionResponse = WorkflowDefinitionRead
 
 export type WorkflowsCreateWorkflowDefinitionData = {
   workflowId: string
   workspaceId: string
 }
 
-export type WorkflowsCreateWorkflowDefinitionResponse = WorkflowDefinition
+export type WorkflowsCreateWorkflowDefinitionResponse = WorkflowDefinitionRead
 
 export type TriggersCreateWebhookData = {
   requestBody: WebhookCreate
@@ -5680,6 +5739,7 @@ export type ActionsGetActionResponse = ActionRead
 export type ActionsUpdateActionData = {
   actionId: string
   requestBody: ActionUpdate
+  workflowId: string
   workspaceId: string
 }
 
@@ -5687,6 +5747,7 @@ export type ActionsUpdateActionResponse = ActionRead
 
 export type ActionsDeleteActionData = {
   actionId: string
+  workflowId: string
   workspaceId: string
 }
 
@@ -5859,21 +5920,21 @@ export type SchedulesListSchedulesData = {
   workspaceId: string
 }
 
-export type SchedulesListSchedulesResponse = Array<Schedule>
+export type SchedulesListSchedulesResponse = Array<ScheduleRead>
 
 export type SchedulesCreateScheduleData = {
   requestBody: ScheduleCreate
   workspaceId: string
 }
 
-export type SchedulesCreateScheduleResponse = Schedule
+export type SchedulesCreateScheduleResponse = ScheduleRead
 
 export type SchedulesGetScheduleData = {
   scheduleId: string
   workspaceId: string
 }
 
-export type SchedulesGetScheduleResponse = Schedule
+export type SchedulesGetScheduleResponse = ScheduleRead
 
 export type SchedulesUpdateScheduleData = {
   requestBody: ScheduleUpdate
@@ -5881,7 +5942,7 @@ export type SchedulesUpdateScheduleData = {
   workspaceId: string
 }
 
-export type SchedulesUpdateScheduleResponse = Schedule
+export type SchedulesUpdateScheduleResponse = ScheduleRead
 
 export type SchedulesDeleteScheduleData = {
   scheduleId: string
@@ -5895,7 +5956,7 @@ export type SchedulesSearchSchedulesData = {
   workspaceId: string
 }
 
-export type SchedulesSearchSchedulesResponse = Array<Schedule>
+export type SchedulesSearchSchedulesResponse = Array<ScheduleRead>
 
 export type TagsListTagsData = {
   workspaceId: string
@@ -6014,6 +6075,14 @@ export type AgentSetDefaultModelData = {
 
 export type AgentSetDefaultModelResponse = {
   [key: string]: string
+}
+
+export type AgentGetWorkspaceProvidersStatusData = {
+  workspaceId: string
+}
+
+export type AgentGetWorkspaceProvidersStatusResponse = {
+  [key: string]: boolean
 }
 
 export type AgentPresetsListAgentPresetsData = {
@@ -6251,7 +6320,8 @@ export type OrganizationSecretsGetOrgSecretByNameData = {
   secretName: string
 }
 
-export type OrganizationSecretsGetOrgSecretByNameResponse = SecretRead
+export type OrganizationSecretsGetOrgSecretByNameResponse =
+  OrganizationSecretRead
 
 export type OrganizationSecretsUpdateOrgSecretByIdData = {
   requestBody: SecretUpdate
@@ -6329,7 +6399,15 @@ export type TablesDeleteColumnResponse = void
 export type TablesListRowsData = {
   cursor?: string | null
   limit?: number
+  /**
+   * Column name to order by
+   */
+  orderBy?: string | null
   reverse?: boolean
+  /**
+   * Sort direction (asc or desc)
+   */
+  sort?: "asc" | "desc" | null
   tableId: string
   workspaceId: string
 }
@@ -6397,6 +6475,17 @@ export type CasesListCasesData = {
    */
   limit?: number
   /**
+   * Column name to order by (e.g. created_at, updated_at, priority, severity, status, tasks). Default: created_at
+   */
+  orderBy?:
+    | "created_at"
+    | "updated_at"
+    | "priority"
+    | "severity"
+    | "status"
+    | "tasks"
+    | null
+  /**
    * Filter by case priority
    */
   priority?: Array<CasePriority> | null
@@ -6412,6 +6501,10 @@ export type CasesListCasesData = {
    * Filter by case severity
    */
   severity?: Array<CaseSeverity> | null
+  /**
+   * Direction to sort (asc or desc)
+   */
+  sort?: "asc" | "desc" | null
   /**
    * Filter by case status
    */
@@ -6442,7 +6535,7 @@ export type CasesSearchCasesData = {
    */
   limit?: number | null
   /**
-   * Field to order the cases by
+   * Column name to order by (e.g. created_at, updated_at, priority, severity, status). Default: created_at
    */
   orderBy?:
     | "created_at"
@@ -6589,7 +6682,7 @@ export type CasesListFieldsData = {
   workspaceId: string
 }
 
-export type CasesListFieldsResponse = Array<CaseFieldRead>
+export type CasesListFieldsResponse = Array<CaseFieldReadMinimal>
 
 export type CasesCreateFieldData = {
   requestBody: CaseFieldCreate
@@ -6853,6 +6946,7 @@ export type ChatStreamChatEventsData = {
 export type ChatStreamChatEventsResponse = Array<
   | PartStartEvent
   | PartDeltaEvent
+  | PartEndEvent
   | FinalResultEvent
   | FunctionToolCallEvent
   | FunctionToolResultEvent
@@ -7007,6 +7101,42 @@ export type ProvidersGetProviderData = {
 }
 
 export type ProvidersGetProviderResponse = ProviderRead
+
+export type McpIntegrationsCreateMcpIntegrationData = {
+  requestBody: MCPIntegrationCreate
+  workspaceId: string
+}
+
+export type McpIntegrationsCreateMcpIntegrationResponse = MCPIntegrationRead
+
+export type McpIntegrationsListMcpIntegrationsData = {
+  workspaceId: string
+}
+
+export type McpIntegrationsListMcpIntegrationsResponse =
+  Array<MCPIntegrationRead>
+
+export type McpIntegrationsGetMcpIntegrationData = {
+  mcpIntegrationId: string
+  workspaceId: string
+}
+
+export type McpIntegrationsGetMcpIntegrationResponse = MCPIntegrationRead
+
+export type McpIntegrationsUpdateMcpIntegrationData = {
+  mcpIntegrationId: string
+  requestBody: MCPIntegrationUpdate
+  workspaceId: string
+}
+
+export type McpIntegrationsUpdateMcpIntegrationResponse = MCPIntegrationRead
+
+export type McpIntegrationsDeleteMcpIntegrationData = {
+  mcpIntegrationId: string
+  workspaceId: string
+}
+
+export type McpIntegrationsDeleteMcpIntegrationResponse = void
 
 export type FeatureFlagsGetFeatureFlagsResponse = FeatureFlagsRead
 
@@ -7477,7 +7607,7 @@ export type $OpenApiTs = {
         /**
          * Successful Response
          */
-        200: Array<WorkflowDefinition>
+        200: Array<WorkflowDefinitionRead>
         /**
          * Validation Error
          */
@@ -7492,7 +7622,7 @@ export type $OpenApiTs = {
         /**
          * Successful Response
          */
-        200: WorkflowDefinition
+        200: WorkflowDefinitionRead
         /**
          * Validation Error
          */
@@ -7505,7 +7635,7 @@ export type $OpenApiTs = {
         /**
          * Successful Response
          */
-        200: WorkflowDefinition
+        200: WorkflowDefinitionRead
         /**
          * Validation Error
          */
@@ -8036,7 +8166,7 @@ export type $OpenApiTs = {
         /**
          * Successful Response
          */
-        200: Array<Schedule>
+        200: Array<ScheduleRead>
         /**
          * Validation Error
          */
@@ -8049,7 +8179,7 @@ export type $OpenApiTs = {
         /**
          * Successful Response
          */
-        200: Schedule
+        200: ScheduleRead
         /**
          * Validation Error
          */
@@ -8064,7 +8194,7 @@ export type $OpenApiTs = {
         /**
          * Successful Response
          */
-        200: Schedule
+        200: ScheduleRead
         /**
          * Validation Error
          */
@@ -8077,7 +8207,7 @@ export type $OpenApiTs = {
         /**
          * Successful Response
          */
-        200: Schedule
+        200: ScheduleRead
         /**
          * Validation Error
          */
@@ -8105,7 +8235,7 @@ export type $OpenApiTs = {
         /**
          * Successful Response
          */
-        200: Array<Schedule>
+        200: Array<ScheduleRead>
         /**
          * Validation Error
          */
@@ -8385,6 +8515,23 @@ export type $OpenApiTs = {
          */
         200: {
           [key: string]: string
+        }
+        /**
+         * Validation Error
+         */
+        422: HTTPValidationError
+      }
+    }
+  }
+  "/agent/workspace/providers/status": {
+    get: {
+      req: AgentGetWorkspaceProvidersStatusData
+      res: {
+        /**
+         * Successful Response
+         */
+        200: {
+          [key: string]: boolean
         }
         /**
          * Validation Error
@@ -8926,7 +9073,7 @@ export type $OpenApiTs = {
         /**
          * Successful Response
          */
-        200: SecretRead
+        200: OrganizationSecretRead
         /**
          * Validation Error
          */
@@ -9393,7 +9540,7 @@ export type $OpenApiTs = {
         /**
          * Successful Response
          */
-        200: Array<CaseFieldRead>
+        200: Array<CaseFieldReadMinimal>
         /**
          * Validation Error
          */
@@ -9842,6 +9989,7 @@ export type $OpenApiTs = {
         200: Array<
           | PartStartEvent
           | PartDeltaEvent
+          | PartEndEvent
           | FinalResultEvent
           | FunctionToolCallEvent
           | FunctionToolResultEvent
@@ -10106,6 +10254,75 @@ export type $OpenApiTs = {
          * Successful Response
          */
         200: ProviderRead
+        /**
+         * Validation Error
+         */
+        422: HTTPValidationError
+      }
+    }
+  }
+  "/mcp-integrations": {
+    post: {
+      req: McpIntegrationsCreateMcpIntegrationData
+      res: {
+        /**
+         * Successful Response
+         */
+        201: MCPIntegrationRead
+        /**
+         * Validation Error
+         */
+        422: HTTPValidationError
+      }
+    }
+    get: {
+      req: McpIntegrationsListMcpIntegrationsData
+      res: {
+        /**
+         * Successful Response
+         */
+        200: Array<MCPIntegrationRead>
+        /**
+         * Validation Error
+         */
+        422: HTTPValidationError
+      }
+    }
+  }
+  "/mcp-integrations/{mcp_integration_id}": {
+    get: {
+      req: McpIntegrationsGetMcpIntegrationData
+      res: {
+        /**
+         * Successful Response
+         */
+        200: MCPIntegrationRead
+        /**
+         * Validation Error
+         */
+        422: HTTPValidationError
+      }
+    }
+    put: {
+      req: McpIntegrationsUpdateMcpIntegrationData
+      res: {
+        /**
+         * Successful Response
+         */
+        200: MCPIntegrationRead
+        /**
+         * Validation Error
+         */
+        422: HTTPValidationError
+      }
+    }
+    delete: {
+      req: McpIntegrationsDeleteMcpIntegrationData
+      res: {
+        /**
+         * Successful Response
+         */
+        204: void
         /**
          * Validation Error
          */

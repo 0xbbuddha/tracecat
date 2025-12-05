@@ -14,6 +14,7 @@ import {
   type ActionUpdate,
   type AgentGetProviderCredentialConfigResponse,
   type AgentGetProvidersStatusResponse,
+  type AgentGetWorkspaceProvidersStatusResponse,
   type AgentListAgentSessionsData,
   type AgentListAgentSessionsResponse,
   type AgentListModelsResponse,
@@ -30,6 +31,7 @@ import {
   agentGetDefaultModel,
   agentGetProviderCredentialConfig,
   agentGetProvidersStatus,
+  agentGetWorkspaceProvidersStatus,
   agentListAgentSessions,
   agentListModels,
   agentListProviderCredentialConfigs,
@@ -43,7 +45,7 @@ import {
   type CaseDurationDefinitionRead,
   type CaseDurationRead,
   type CaseEventsWithUsers,
-  type CaseFieldRead,
+  type CaseFieldReadMinimal,
   type CaseRead,
   type CaseReadMinimal,
   type CasesGetCaseData,
@@ -143,7 +145,7 @@ import {
   registryRepositoriesReloadRegistryRepositories,
   registryRepositoriesSyncRegistryRepository,
   type SAMLSettingsRead,
-  type Schedule,
+  type ScheduleRead,
   type SchedulesCreateScheduleData,
   type SchedulesDeleteScheduleData,
   type SchedulesUpdateScheduleData,
@@ -314,7 +316,7 @@ export function useAppInfo() {
 export function useAction(
   actionId: string,
   workspaceId: string,
-  workflowId: string | null
+  workflowId: string
 ) {
   const [isSaving, setIsSaving] = useState(false)
   const queryClient = useQueryClient()
@@ -336,6 +338,7 @@ export function useAction(
       return await actionsUpdateAction({
         workspaceId,
         actionId,
+        workflowId,
         requestBody: values,
       })
     },
@@ -964,7 +967,7 @@ export function useSchedules(workflowId: string) {
     data: schedules,
     isLoading,
     error,
-  } = useQuery<Schedule[], Error>({
+  } = useQuery<ScheduleRead[], Error>({
     queryKey: [workflowId, "schedules"],
     queryFn: async ({ queryKey }) => {
       const [workflowId] = queryKey as [string, string]
@@ -3410,7 +3413,7 @@ export function useCaseFields(workspaceId: string) {
     data: caseFields,
     isLoading: caseFieldsIsLoading,
     error: caseFieldsError,
-  } = useQuery<CaseFieldRead[], TracecatApiError>({
+  } = useQuery<CaseFieldReadMinimal[], TracecatApiError>({
     queryKey: ["case-fields", workspaceId],
     queryFn: async () => await casesListFields({ workspaceId }),
   })
@@ -4539,6 +4542,26 @@ export function useModelProvidersStatus() {
   } = useQuery<AgentGetProvidersStatusResponse>({
     queryKey: ["agent-providers-status"],
     queryFn: async () => await agentGetProvidersStatus(),
+  })
+
+  return {
+    providersStatus,
+    isLoading,
+    error,
+    refetch,
+  }
+}
+
+export function useWorkspaceModelProvidersStatus(workspaceId: string) {
+  const {
+    data: providersStatus,
+    isLoading,
+    error,
+    refetch,
+  } = useQuery<AgentGetWorkspaceProvidersStatusResponse>({
+    queryKey: ["workspace-agent-providers-status", workspaceId],
+    queryFn: async () =>
+      await agentGetWorkspaceProvidersStatus({ workspaceId }),
   })
 
   return {

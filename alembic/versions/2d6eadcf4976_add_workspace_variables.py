@@ -9,7 +9,6 @@ Create Date: 2025-10-26 14:06:11.873927
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-import sqlmodel.sql.sqltypes
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
@@ -38,16 +37,26 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("surrogate_id", sa.Integer(), nullable=False),
-        sa.Column("id", sqlmodel.sql.sqltypes.GUID(), nullable=False),
-        sa.Column("name", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-        sa.Column("description", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("name", sa.String(), nullable=False),
+        sa.Column("description", sa.String(), nullable=True),
         sa.Column("values", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.Column("environment", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("environment", sa.String(), nullable=False),
         sa.Column("tags", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("owner_id", sa.UUID(), nullable=False),
-        sa.ForeignKeyConstraint(["owner_id"], ["workspace.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("surrogate_id"),
-        sa.UniqueConstraint("name", "environment", "owner_id"),
+        sa.ForeignKeyConstraint(
+            ["owner_id"],
+            ["workspace.id"],
+            ondelete="CASCADE",
+            name="workspace_variable_owner_id_fkey",
+        ),
+        sa.PrimaryKeyConstraint("surrogate_id", name="workspace_variable_pkey"),
+        sa.UniqueConstraint(
+            "name",
+            "environment",
+            "owner_id",
+            name="workspace_variable_name_environment_owner_id_key",
+        ),
     )
     op.create_index(
         op.f("ix_workspace_variable_id"), "workspace_variable", ["id"], unique=True

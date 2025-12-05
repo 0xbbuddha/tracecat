@@ -17,14 +17,15 @@ from fastapi import (
 )
 from pydantic import ValidationError
 from slugify import slugify
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, NoResultFound
-from sqlmodel import select
 
 from tracecat.auth.api_keys import generate_api_key
 from tracecat.auth.dependencies import WorkspaceUserRole
 from tracecat.db.common import DBConstraints
 from tracecat.db.dependencies import AsyncDBSession
-from tracecat.db.models import Webhook, WebhookApiKey, Workflow, WorkflowDefinition
+from tracecat.db.models import Webhook, WebhookApiKey, Workflow
+from tracecat.dsl.common import DSLInput
 from tracecat.dsl.schemas import DSLConfig
 from tracecat.exceptions import TracecatNotFoundError, TracecatValidationError
 from tracecat.identifiers.workflow import AnyWorkflowIDPath, WorkflowUUID
@@ -53,6 +54,7 @@ from tracecat.workflow.management.schemas import (
     ExternalWorkflowDefinition,
     WorkflowCommitResponse,
     WorkflowCreate,
+    WorkflowDefinitionRead,
     WorkflowDefinitionReadMinimal,
     WorkflowEntrypointValidationRequest,
     WorkflowEntrypointValidationResponse,
@@ -63,6 +65,7 @@ from tracecat.workflow.management.schemas import (
 )
 from tracecat.workflow.management.types import WorkflowDefinitionMinimal
 from tracecat.workflow.management.utils import build_trigger_inputs_schema
+from tracecat.workflow.schedules.schemas import ScheduleRead
 
 router = APIRouter(prefix="/workflows")
 
@@ -275,7 +278,8 @@ async def get_workflow(
 
     actions = workflow.actions or []
     actions_responses = {
-        action.id: ActionRead(**action.model_dump()) for action in actions
+        action.id: ActionRead.model_validate(action, from_attributes=True)
+        for action in actions
     }
     # Add webhook/schedules
     try:
@@ -287,7 +291,7 @@ async def get_workflow(
         expects_schema = None
     return WorkflowRead(
         id=WorkflowUUID.new(workflow.id).short(),
-        owner_id=workflow.owner_id,
+        workspace_id=workflow.workspace_id,
         title=workflow.title,
         description=workflow.description,
         status=workflow.status,
@@ -300,7 +304,7 @@ async def get_workflow(
         config=DSLConfig(**workflow.config),
         actions=actions_responses,
         webhook=WebhookRead.model_validate(workflow.webhook, from_attributes=True),
-        schedules=workflow.schedules or [],
+        schedules=ScheduleRead.list_adapter().validate_python(workflow.schedules),
         alias=workflow.alias,
         error_handler=workflow.error_handler,
     )
@@ -387,6 +391,7 @@ async def commit_workflow(
     # Tier 1: DSLInput validation
     # Verify that the workflow DSL is structurally sound
     construction_errors: list[ValidationResult] = []
+    dsl: DSLInput | None = None
     try:
         # Convert the workflow into a WorkflowDefinition
         # XXX: When we commit from the workflow, we have action IDs
@@ -420,6 +425,8 @@ async def commit_workflow(
             errors=construction_errors,
         )
 
+    if dsl is None:
+        raise ValueError("dsl should be defined if no construction errors")
     # When we're here, we've verified that the workflow DSL is structurally sound
     # Now, we have to ensure that the arguments are sound
 
@@ -525,10 +532,11 @@ async def list_workflow_definitions(
     role: WorkspaceUserRole,
     session: AsyncDBSession,
     workflow_id: AnyWorkflowIDPath,
-) -> list[WorkflowDefinition]:
+) -> list[WorkflowDefinitionRead]:
     """List all workflow definitions for a Workflow."""
     service = WorkflowDefinitionsService(session, role=role)
-    return await service.list_workflow_defitinions(workflow_id=workflow_id)
+    defns = await service.list_workflow_defitinions(workflow_id=workflow_id)
+    return WorkflowDefinitionRead.list_adapter().validate_python(defns)
 
 
 @router.get("/{workflow_id}/definition", tags=["workflows"])
@@ -537,7 +545,7 @@ async def get_workflow_definition(
     session: AsyncDBSession,
     workflow_id: AnyWorkflowIDPath,
     version: int | None = None,
-) -> WorkflowDefinition:
+) -> WorkflowDefinitionRead:
     """Get the latest version of a workflow definition."""
     service = WorkflowDefinitionsService(session, role=role)
     definition = await service.get_definition_by_workflow_id(
@@ -547,7 +555,7 @@ async def get_workflow_definition(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found"
         )
-    return definition
+    return WorkflowDefinitionRead.model_validate(definition)
 
 
 @router.post("/{workflow_id}/definition", tags=["workflows"])
@@ -555,7 +563,7 @@ async def create_workflow_definition(
     role: WorkspaceUserRole,
     session: AsyncDBSession,
     workflow_id: AnyWorkflowIDPath,
-) -> WorkflowDefinition:
+) -> WorkflowDefinitionRead:
     """Get the latest version of a workflow definition."""
     raise NotImplementedError
 
@@ -581,7 +589,7 @@ async def create_webhook(
         )
 
     webhook = Webhook(
-        owner_id=role.workspace_id,
+        workspace_id=role.workspace_id,
         methods=cast(list[str], params.methods),
         workflow_id=workflow_id,
         status=params.status,
@@ -630,14 +638,14 @@ async def update_webhook(
     params: WebhookUpdate,
 ) -> None:
     """Update the webhook for a workflow. We currently supprt only one webhook per workflow."""
-    result = await session.exec(
+    result = await session.execute(
         select(Workflow).where(
-            Workflow.owner_id == role.workspace_id,
+            Workflow.workspace_id == role.workspace_id,
             Workflow.id == workflow_id,
         )
     )
     try:
-        workflow = result.one()
+        workflow = result.scalar_one()
     except NoResultFound as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found"
@@ -682,14 +690,14 @@ async def generate_webhook_api_key(
     api_key = webhook.api_key
     if api_key is None:
         api_key = WebhookApiKey(
-            owner_id=role.workspace_id,
+            workspace_id=role.workspace_id,
             webhook_id=webhook.id,
             hashed=generated.hashed,
             salt=generated.salt_b64,
             preview=preview,
         )
     else:
-        api_key.owner_id = role.workspace_id
+        api_key.workspace_id = role.workspace_id
         api_key.hashed = generated.hashed
         api_key.salt = generated.salt_b64
         api_key.preview = preview

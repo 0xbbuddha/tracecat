@@ -9,7 +9,7 @@ from httpx_oauth.clients.google import GoogleOAuth2
 from pydantic import BaseModel
 from pydantic_core import to_jsonable_python
 from sqlalchemy.exc import IntegrityError
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 from tracecat_ee.agent.router import router as ee_agent_router
 
 from tracecat import __version__ as APP_VERSION
@@ -51,7 +51,11 @@ from tracecat.editor.router import router as editor_router
 from tracecat.exceptions import TracecatException
 from tracecat.feature_flags import FeatureFlag, feature_flag_dep
 from tracecat.feature_flags.router import router as feature_flags_router
-from tracecat.integrations.router import integrations_router, providers_router
+from tracecat.integrations.router import (
+    integrations_router,
+    mcp_router,
+    providers_router,
+)
 from tracecat.logger import logger
 from tracecat.middleware import (
     AuthorizationCacheMiddleware,
@@ -222,10 +226,7 @@ def create_app(**kwargs) -> FastAPI:
         agent_preset_router,
         dependencies=[Depends(feature_flag_dep(FeatureFlag.AGENT_PRESETS))],
     )
-    app.include_router(
-        ee_agent_router,
-        dependencies=[Depends(feature_flag_dep(FeatureFlag.AGENT_APPROVALS))],
-    )
+    app.include_router(ee_agent_router)
     app.include_router(editor_router)
     app.include_router(registry_repos_router)
     app.include_router(registry_actions_router)
@@ -245,6 +246,7 @@ def create_app(**kwargs) -> FastAPI:
     app.include_router(workflow_folders_router)
     app.include_router(integrations_router)
     app.include_router(providers_router)
+    app.include_router(mcp_router)
     app.include_router(feature_flags_router)
     app.include_router(
         vcs_router,
