@@ -1,13 +1,15 @@
 from fastapi import APIRouter, HTTPException, status
-from pydantic_core import PydanticUndefined
+from pydantic import ValidationError
 
 from tracecat.auth.dependencies import WorkspaceUserRole
 from tracecat.db.dependencies import AsyncDBSession
 from tracecat.exceptions import RegistryError, TracecatValidationError
-from tracecat.identifiers.action import ActionID
 from tracecat.identifiers.workflow import AnyWorkflowIDPath, WorkflowUUID
 from tracecat.interactions.schemas import ActionInteractionValidator
+from tracecat.logger import logger
+from tracecat.registry.actions.schemas import RegistryActionInterfaceValidator
 from tracecat.registry.actions.service import RegistryActionsService
+from tracecat.workflow.actions.dependencies import AnyActionIDPath
 from tracecat.workflow.actions.schemas import (
     ActionControlFlow,
     ActionCreate,
@@ -77,7 +79,7 @@ async def create_action(
 @router.get("/{action_id}")
 async def get_action(
     role: WorkspaceUserRole,
-    action_id: ActionID,
+    action_id: AnyActionIDPath,
     workflow_id: AnyWorkflowIDPath,
     session: AsyncDBSession,
 ) -> ActionRead:
@@ -91,22 +93,32 @@ async def get_action(
 
     # Add default value for input if it's empty
     if len(action.inputs) == 0:
-        # Lookup action type in the registry
+        # Lookup action type in the registry DB (no module loading required)
         ra_service = RegistryActionsService(session, role=role)
         try:
-            reg_action = await ra_service.load_action_impl(action.type)
+            reg_action = await ra_service.get_action(action_name=action.type)
         except RegistryError as e:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Action not found in registry",
             ) from e
-        # We want to construct a YAML string that contains the defaults
-        prefilled_inputs = "\n".join(
-            f"{field}: "
-            for field, field_info in reg_action.args_cls.model_fields.items()
-            if field_info.default is PydanticUndefined
-        )
-        action.inputs = prefilled_inputs
+        # Extract required fields from the interface JSON schema stored in DB
+        # The schema has: { "properties": {...}, "required": [...], ... }
+        try:
+            interface = RegistryActionInterfaceValidator.validate_python(
+                reg_action.interface or {}
+            )
+            expects_schema = interface["expects"]
+            required_fields = expects_schema.get("required", [])
+            # Build prefilled YAML with required fields
+            prefilled_inputs = "\n".join(f"{field}: " for field in required_fields)
+            action.inputs = prefilled_inputs
+        except ValidationError as e:
+            logger.warning(
+                "Failed to validate registry action interface",
+                action_name=action.type,
+                error=e,
+            )
 
     return ActionRead(
         id=action.id,
@@ -128,7 +140,7 @@ async def get_action(
 @router.post("/{action_id}")
 async def update_action(
     role: WorkspaceUserRole,
-    action_id: ActionID,
+    action_id: AnyActionIDPath,
     workflow_id: AnyWorkflowIDPath,
     params: ActionUpdate,
     session: AsyncDBSession,
@@ -148,7 +160,7 @@ async def update_action(
 @router.delete("/{action_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_action(
     role: WorkspaceUserRole,
-    action_id: ActionID,
+    action_id: AnyActionIDPath,
     workflow_id: AnyWorkflowIDPath,
     session: AsyncDBSession,
 ) -> None:

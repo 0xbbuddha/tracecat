@@ -180,7 +180,6 @@ export type AgentOutput = {
   duration: number
   usage: RunUsage
   session_id: string
-  trace_id?: string | null
 }
 
 export type AgentPreset = {
@@ -520,6 +519,23 @@ export type AudioUrl = {
    * distinguish multiple files.
    */
   readonly identifier: string
+}
+
+/**
+ * Settings for audit logging.
+ */
+export type AuditSettingsRead = {
+  audit_webhook_url: string | null
+}
+
+/**
+ * Settings for audit logging.
+ */
+export type AuditSettingsUpdate = {
+  /**
+   * Webhook URL that receives streamed audit events. When unset, audit events are skipped.
+   */
+  audit_webhook_url?: string | null
 }
 
 export type AuthSettingsRead = {
@@ -1718,7 +1734,7 @@ export type DSLRunArgs = {
    */
   timeout?: string
   /**
-   * The schedule ID that triggered this workflow, if any.
+   * The schedule ID that triggered this workflow, if any. Auto-converts from legacy 'sch-<hex>' format.
    */
   schedule_id?: string | null
 }
@@ -1977,6 +1993,7 @@ export type FeatureFlag =
   | "agent-presets"
   | "case-durations"
   | "case-tasks"
+  | "registry-sync-v2"
 
 /**
  * Response model for feature flags.
@@ -3442,6 +3459,7 @@ export type RetryPromptPart = {
 export type Role = {
   type: "user" | "service"
   workspace_id?: string | null
+  organization_id?: string
   workspace_role?: WorkspaceRole | null
   user_id?: string | null
   access_level?: AccessLevel
@@ -4353,6 +4371,7 @@ export type TemplateActionValidationErrorType =
   | "ACTION_NAME_CONFLICT"
   | "STEP_VALIDATION_ERROR"
   | "EXPRESSION_VALIDATION_ERROR"
+  | "SERIALIZATION_ERROR"
 
 export type Text = {
   component_id?: "text"
@@ -6292,6 +6311,14 @@ export type SettingsUpdateAppSettingsData = {
 
 export type SettingsUpdateAppSettingsResponse = void
 
+export type SettingsGetAuditSettingsResponse = AuditSettingsRead
+
+export type SettingsUpdateAuditSettingsData = {
+  requestBody: AuditSettingsUpdate
+}
+
+export type SettingsUpdateAuditSettingsResponse = void
+
 export type SettingsGetAgentSettingsResponse = AgentSettingsRead
 
 export type SettingsUpdateAgentSettingsData = {
@@ -7261,6 +7288,10 @@ export type AuthSsoAcsData = {
 export type AuthSsoAcsResponse = unknown
 
 export type PublicCheckHealthResponse = {
+  [key: string]: string
+}
+
+export type PublicCheckReadyResponse = {
   [key: string]: string
 }
 
@@ -9015,6 +9046,29 @@ export type $OpenApiTs = {
       }
     }
   }
+  "/settings/audit": {
+    get: {
+      res: {
+        /**
+         * Successful Response
+         */
+        200: AuditSettingsRead
+      }
+    }
+    patch: {
+      req: SettingsUpdateAuditSettingsData
+      res: {
+        /**
+         * Successful Response
+         */
+        204: void
+        /**
+         * Validation Error
+         */
+        422: HTTPValidationError
+      }
+    }
+  }
   "/settings/agent": {
     get: {
       res: {
@@ -10713,6 +10767,18 @@ export type $OpenApiTs = {
     }
   }
   "/health": {
+    get: {
+      res: {
+        /**
+         * Successful Response
+         */
+        200: {
+          [key: string]: string
+        }
+      }
+    }
+  }
+  "/ready": {
     get: {
       res: {
         /**

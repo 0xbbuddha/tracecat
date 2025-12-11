@@ -237,6 +237,12 @@ TRACECAT__BLOB_STORAGE_BUCKET_ATTACHMENTS = os.environ.get(
 )
 """Bucket for case attachments."""
 
+# Bucket for registry wheels
+TRACECAT__BLOB_STORAGE_BUCKET_REGISTRY = os.environ.get(
+    "TRACECAT__BLOB_STORAGE_BUCKET_REGISTRY", "tracecat-registry"
+)
+"""Bucket for registry wheel files and versioned artifacts."""
+
 TRACECAT__BLOB_STORAGE_ENDPOINT = os.environ.get(
     "TRACECAT__BLOB_STORAGE_ENDPOINT", "http://minio:9000"
 )
@@ -265,14 +271,58 @@ TRACECAT__LOCAL_REPOSITORY_ENABLED = os.getenv(
 TRACECAT__LOCAL_REPOSITORY_PATH = os.getenv("TRACECAT__LOCAL_REPOSITORY_PATH")
 TRACECAT__LOCAL_REPOSITORY_CONTAINER_PATH = "/app/local_registry"
 
-# === Python Script Execution === #
-TRACECAT__PYODIDE_VERSION = os.environ.get("PYODIDE_VERSION", "0.27.6")
-"""Version of Pyodide to use for Python script execution in WebAssembly sandbox."""
-
-TRACECAT__NODE_MODULES_DIR = os.environ.get(
-    "NODE_MODULES_DIR", "/home/apiuser/.local/lib/node_modules"
+# === Python Script Execution (nsjail Sandbox) === #
+TRACECAT__SANDBOX_NSJAIL_PATH = os.environ.get(
+    "TRACECAT__SANDBOX_NSJAIL_PATH", "/usr/local/bin/nsjail"
 )
-"""Directory where Node.js modules are installed for Deno/Pyodide execution."""
+"""Path to the nsjail binary for sandbox execution."""
+
+TRACECAT__SANDBOX_ROOTFS_PATH = os.environ.get(
+    "TRACECAT__SANDBOX_ROOTFS_PATH", "/var/lib/tracecat/sandbox-rootfs"
+)
+"""Path to the sandbox rootfs directory containing Python 3.12 + uv."""
+
+TRACECAT__SANDBOX_CACHE_DIR = os.environ.get(
+    "TRACECAT__SANDBOX_CACHE_DIR", "/var/lib/tracecat/sandbox-cache"
+)
+"""Base directory for sandbox caching (packages, uv cache)."""
+
+TRACECAT__SANDBOX_DEFAULT_TIMEOUT = int(
+    os.environ.get("TRACECAT__SANDBOX_DEFAULT_TIMEOUT", "300")
+)
+"""Default timeout for sandbox script execution in seconds."""
+
+TRACECAT__SANDBOX_DEFAULT_MEMORY_MB = int(
+    os.environ.get("TRACECAT__SANDBOX_DEFAULT_MEMORY_MB", "2048")
+)
+"""Default memory limit for sandbox execution in megabytes (2 GiB)."""
+
+TRACECAT__SANDBOX_PYPI_INDEX_URL = os.environ.get(
+    "TRACECAT__SANDBOX_PYPI_INDEX_URL", "https://pypi.org/simple"
+)
+"""Primary PyPI index URL for package installation. Supports private mirrors and air-gapped deployments."""
+
+TRACECAT__SANDBOX_PYPI_EXTRA_INDEX_URLS = [
+    url.strip()
+    for url in os.environ.get("TRACECAT__SANDBOX_PYPI_EXTRA_INDEX_URLS", "").split(",")
+    if url.strip()
+]
+"""Additional PyPI index URLs (comma-separated). Used as fallback sources for package installation."""
+
+TRACECAT__DISABLE_NSJAIL = os.environ.get(
+    "TRACECAT__DISABLE_NSJAIL", "true"
+).lower() in ("true", "1")
+"""Disable nsjail sandbox and use safe Python executor instead.
+
+When True (default), uses SafePythonExecutor with AST-based validation and import
+restrictions. This mode works without privileged Docker mode but has less isolation.
+
+When False, uses nsjail sandbox for full OS-level isolation. Requires:
+- Linux with kernel >= 4.6
+- Docker privileged mode or CAP_SYS_ADMIN capability
+- nsjail binary at TRACECAT__SANDBOX_NSJAIL_PATH
+- Sandbox rootfs at TRACECAT__SANDBOX_ROOTFS_PATH
+"""
 
 # === Rate Limiting === #
 TRACECAT__RATE_LIMIT_ENABLED = (
@@ -470,9 +520,13 @@ for _flag in os.environ.get("TRACECAT__FEATURE_FLAGS", "").split(","):
 
 
 # === Agent config === #
+ENABLE_REMOTE_AGENT_EXECUTOR = os.environ.get(
+    "ENABLE_REMOTE_AGENT_EXECUTOR", "false"
+).lower() in ("true", "1")
+"""Whether to enable the remote agent executor."""
+
 TRACECAT__AGENT_MAX_TOOLS = int(os.environ.get("TRACECAT__AGENT_MAX_TOOLS", 30))
 """The maximum number of tools that can be used in an agent."""
-
 
 TRACECAT__AGENT_MAX_TOOL_CALLS = int(
     os.environ.get("TRACECAT__AGENT_MAX_TOOL_CALLS", 40)

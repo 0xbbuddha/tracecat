@@ -64,13 +64,15 @@ dependencies = [
     "tomli==2.2.1",
     "tracecat-ee",
     "tracecat-registry",
-    "uv==0.9.7",
+    "uv==0.9.15",
     "uvicorn>=0.33.0,<0.34",
     "virtualenv==20.27.0",
     # This is required until https://github.com/ray-project/ray/issues/54134 is released.
     "pip>=25.3,<26.0",
     "pygithub>=2.7.0",
     "croniter>=6.0.0",
+    # Security: CVE-2025-66471 - urllib3 streaming API vulnerability
+    "urllib3>=2.6.0",
 ]
 dynamic = ["version"]
 

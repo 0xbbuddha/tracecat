@@ -60,7 +60,6 @@ from tracecat.identifiers import (
     OwnerID,
     WorkspaceID,
     action,
-    id_factory,
 )
 from tracecat.identifiers.workflow import WorkflowUUID
 from tracecat.integrations.enums import IntegrationStatus, MCPAuthType, OAuthGrantType
@@ -204,9 +203,6 @@ def _to_dict(instance: RecordModel) -> dict[str, Any]:
 class OAuthAccount(SQLAlchemyBaseOAuthAccountTableUUID, Base):
     __tablename__ = "oauth_account"
 
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID, ForeignKey("user.id"), nullable=False
-    )
     user: Mapped[User] = relationship(back_populates="oauth_accounts")
 
 
@@ -382,9 +378,6 @@ class AccessToken(SQLAlchemyBaseAccessTokenTableUUID, Base):
     __tablename__ = "access_token"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID, unique=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID, ForeignKey("user.id"), nullable=False
-    )
     user: Mapped[User] = relationship(back_populates="access_tokens")
 
 
@@ -417,12 +410,12 @@ class BaseSecret(Base):
 
     __abstract__ = True
 
-    id: Mapped[str] = mapped_column(
-        String(255),
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        default=uuid.uuid4,
         nullable=False,
         unique=True,
         index=True,
-        default=id_factory("secret"),
     )
     type: Mapped[str] = mapped_column(String(255), nullable=False, default="custom")
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -501,9 +494,9 @@ class WorkflowDefinition(WorkspaceModel):
 
     __tablename__ = "workflow_definition"
 
-    id: Mapped[str] = mapped_column(
-        String(64),
-        default=id_factory("wf-defn"),
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        default=uuid.uuid4,
         nullable=False,
         unique=True,
         index=True,
@@ -652,6 +645,14 @@ class Workflow(WorkspaceModel):
         doc="Workflow alias or ID for the workflow to run when this fails.",
     )
     icon_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    registry_lock: Mapped[dict[str, str] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        doc=(
+            "Maps repository origin to pinned version string. "
+            "Example: {'builtin': '1.2.3', 'git+ssh://...': '0.5.0'}"
+        ),
+    )
     folder_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID,
         ForeignKey("workflow_folder.id", ondelete="CASCADE"),
@@ -701,8 +702,8 @@ class WebhookApiKey(WorkspaceModel):
         unique=True,
         index=True,
     )
-    webhook_id: Mapped[str | None] = mapped_column(
-        String,
+    webhook_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID,
         ForeignKey("webhook.id", ondelete="CASCADE"),
         nullable=True,
         unique=True,
@@ -724,9 +725,9 @@ class WebhookApiKey(WorkspaceModel):
 class Webhook(WorkspaceModel):
     __tablename__ = "webhook"
 
-    id: Mapped[str] = mapped_column(
-        String(64),
-        default=id_factory("wh"),
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        default=uuid.uuid4,
         nullable=False,
         unique=True,
         index=True,
@@ -765,7 +766,9 @@ class Webhook(WorkspaceModel):
         secret = os.getenv("TRACECAT__SIGNING_SECRET")
         if not secret:
             raise ValueError("TRACECAT__SIGNING_SECRET is not set")
-        return hashlib.sha256(f"{self.id}{secret}".encode()).hexdigest()
+        # Using legacy format to prevent webhook url changes
+        id_part = f"wh-{self.id.hex}"
+        return hashlib.sha256(f"{id_part}{secret}".encode()).hexdigest()
 
     @property
     def url(self) -> str:
@@ -800,9 +803,9 @@ class Webhook(WorkspaceModel):
 class Schedule(WorkspaceModel):
     __tablename__ = "schedule"
 
-    id: Mapped[str] = mapped_column(
-        String(64),
-        default=id_factory("sch"),
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        default=uuid.uuid4,
         nullable=False,
         unique=True,
         index=True,
@@ -847,9 +850,9 @@ class Action(WorkspaceModel):
 
     __tablename__ = "action"
 
-    id: Mapped[str] = mapped_column(
-        String(64),
-        default=id_factory("act"),
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        default=uuid.uuid4,
         nullable=False,
         unique=True,
         index=True,
@@ -935,6 +938,11 @@ class RegistryRepository(OrganizationModel):
         cascade="all, delete",
         lazy="selectin",
     )
+    versions: Mapped[list[RegistryVersion]] = relationship(
+        "RegistryVersion",
+        back_populates="repository",
+        cascade="all, delete",
+    )
 
 
 class RegistryAction(OrganizationModel):
@@ -1009,6 +1017,123 @@ class RegistryAction(OrganizationModel):
 
     @property
     def action(self):
+        return f"{self.namespace}.{self.name}"
+
+
+class RegistryVersion(OrganizationModel):
+    """An immutable versioned snapshot of a registry repository.
+
+    Stores frozen manifests (index of actions and how to load them).
+    Once created, never modified. Used to pin workflows to specific
+    registry versions for reproducible execution.
+    """
+
+    __tablename__ = "registry_version"
+    __table_args__ = (UniqueConstraint("organization_id", "repository_id", "version"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID, default=uuid.uuid4, nullable=False, unique=True, index=True
+    )
+    repository_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("registry_repository.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        doc="Version string, e.g., '1.0.0', 'tracecat_core@1.2.3'",
+    )
+    commit_sha: Mapped[str | None] = mapped_column(
+        String,
+        nullable=True,
+        doc="Git commit SHA if applicable",
+    )
+    manifest: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        doc="Frozen action definitions",
+    )
+    wheel_uri: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        doc="S3 URI to the wheel file",
+    )
+
+    repository: Mapped[RegistryRepository] = relationship(back_populates="versions")
+    index_entries: Mapped[list[RegistryIndex]] = relationship(
+        "RegistryIndex",
+        back_populates="registry_version",
+        cascade="all, delete",
+        lazy="selectin",
+    )
+
+
+class RegistryIndex(OrganizationModel):
+    """Index of actions from a RegistryVersion manifest for fast lookups.
+
+    Derived from RegistryVersion.manifest - provides fast action lookups
+    for UI display and workflow validation. Equivalent to today's RegistryAction
+    but scoped to a specific version.
+    """
+
+    __tablename__ = "registry_index"
+    __table_args__ = (UniqueConstraint("registry_version_id", "namespace", "name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID, default=uuid.uuid4, nullable=False, unique=True, index=True
+    )
+    registry_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("registry_version.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    namespace: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    action_type: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        doc="Action type: 'udf' or 'template'",
+    )
+    description: Mapped[str] = mapped_column(String, nullable=False)
+    default_title: Mapped[str | None] = mapped_column(
+        String, nullable=True, doc="Default title of the action"
+    )
+    display_group: Mapped[str | None] = mapped_column(
+        String, nullable=True, doc="Presentation group of the action"
+    )
+    doc_url: Mapped[str | None] = mapped_column(
+        String, nullable=True, doc="Link to documentation"
+    )
+    author: Mapped[str | None] = mapped_column(
+        String, nullable=True, doc="Author of the action"
+    )
+    deprecated: Mapped[str | None] = mapped_column(
+        String, nullable=True, doc="Deprecation message if deprecated"
+    )
+    secrets: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        doc="Secrets required by the action",
+    )
+    interface: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=True,
+        doc="Action interface (expects/returns schema)",
+    )
+    options: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        default=dict,
+        nullable=True,
+        doc="Action options",
+    )
+
+    registry_version: Mapped[RegistryVersion] = relationship(
+        back_populates="index_entries"
+    )
+
+    @property
+    def action(self) -> str:
         return f"{self.namespace}.{self.name}"
 
 
