@@ -1,17 +1,18 @@
 "use client"
 
 import {
-  BotIcon,
-  BracketsIcon,
-  KeyRoundIcon,
+  BlocksIcon,
+  ChevronDown,
+  LockKeyholeIcon,
   type LucideIcon,
-  MessageSquareIcon,
+  MessageSquare,
+  SquareMousePointerIcon,
   SquareStackIcon,
   Table2Icon,
   UserCheckIcon,
   UsersIcon,
+  VariableIcon,
   WorkflowIcon,
-  ZapIcon,
 } from "lucide-react"
 import Link from "next/link"
 import { useParams, usePathname } from "next/navigation"
@@ -19,6 +20,11 @@ import type * as React from "react"
 import { useEffect, useRef } from "react"
 import { AppMenu } from "@/components/sidebar/app-menu"
 import { SidebarUserNav } from "@/components/sidebar/sidebar-user-nav"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible"
 import {
   Sidebar,
   SidebarContent,
@@ -30,9 +36,14 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarMenuSub,
+  SidebarMenuSubButton,
+  SidebarMenuSubItem,
   SidebarRail,
   useSidebar,
 } from "@/components/ui/sidebar"
+import { useListChats } from "@/hooks/use-chat"
+import { useFeatureFlag } from "@/hooks/use-feature-flags"
 import { useWorkspaceId } from "@/providers/workspace-id"
 
 function SidebarHeaderContent({ workspaceId }: { workspaceId: string }) {
@@ -49,6 +60,18 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const caseId = params?.caseId
   const casesListPath = `${basePath}/cases`
   const isCasesList = pathname === casesListPath
+  const { isFeatureEnabled } = useFeatureFlag()
+  const agentPresetsEnabled = isFeatureEnabled("agent-presets")
+  const { chats } = useListChats({
+    workspaceId,
+    entityType: "copilot",
+    entityId: workspaceId,
+    limit: 1,
+  })
+  const mostRecentChatId = chats?.[0]?.id
+  const copilotUrl = mostRecentChatId
+    ? `${basePath}/copilot?chatId=${mostRecentChatId}`
+    : `${basePath}/copilot`
 
   useEffect(() => {
     setSidebarOpenRef.current = setSidebarOpen
@@ -65,19 +88,33 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
 
   type NavItem = {
     title: string
-    url: string
+    url?: string
     icon: LucideIcon
     isActive?: boolean
     visible?: boolean
+    items?: {
+      title: string
+      url: string
+      isActive?: boolean
+    }[]
   }
 
   const navMain: NavItem[] = [
     {
-      title: "Copilot",
-      url: `${basePath}/copilot`,
-      icon: MessageSquareIcon,
-      isActive: pathname?.startsWith(`${basePath}/copilot`),
+      title: "Chats",
+      url: copilotUrl,
+      icon: MessageSquare,
+      isActive: pathname === `${basePath}/copilot`,
     },
+    {
+      title: "Approvals",
+      url: `${basePath}/approvals`,
+      icon: UserCheckIcon,
+      isActive: pathname?.startsWith(`${basePath}/approvals`),
+    },
+  ]
+
+  const navWorkspace: NavItem[] = [
     {
       title: "Workflows",
       url: `${basePath}/workflows`,
@@ -90,21 +127,16 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       icon: SquareStackIcon,
       isActive: pathname?.startsWith(`${basePath}/cases`),
     },
-    {
-      title: "Agents",
-      url: `${basePath}/agents`,
-      icon: BotIcon,
-      isActive: pathname?.startsWith(`${basePath}/agents`),
-    },
-    {
-      title: "Approvals",
-      url: `${basePath}/approvals`,
-      icon: UserCheckIcon,
-      isActive: pathname?.startsWith(`${basePath}/approvals`),
-    },
-  ]
-
-  const navWorkspace = [
+    ...(agentPresetsEnabled
+      ? [
+          {
+            title: "Agents",
+            url: `${basePath}/agents`,
+            icon: SquareMousePointerIcon,
+            isActive: pathname?.startsWith(`${basePath}/agents`),
+          },
+        ]
+      : []),
     {
       title: "Tables",
       url: `${basePath}/tables`,
@@ -114,19 +146,19 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     {
       title: "Variables",
       url: `${basePath}/variables`,
-      icon: BracketsIcon,
+      icon: VariableIcon,
       isActive: pathname?.startsWith(`${basePath}/variables`),
     },
     {
       title: "Credentials",
       url: `${basePath}/credentials`,
-      icon: KeyRoundIcon,
+      icon: LockKeyholeIcon,
       isActive: pathname?.startsWith(`${basePath}/credentials`),
     },
     {
       title: "Integrations",
       url: `${basePath}/integrations`,
-      icon: ZapIcon,
+      icon: BlocksIcon,
       isActive: pathname?.startsWith(`${basePath}/integrations`),
     },
     {
@@ -151,7 +183,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 .map((item) => (
                   <SidebarMenuItem key={item.title}>
                     <SidebarMenuButton asChild isActive={item.isActive}>
-                      <Link href={item.url}>
+                      <Link href={item.url!}>
                         <item.icon />
                         <span>{item.title}</span>
                       </Link>
@@ -161,23 +193,58 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
-        <SidebarGroup>
-          <SidebarGroupLabel>Workspace</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {navWorkspace.map((item) => (
-                <SidebarMenuItem key={item.title}>
-                  <SidebarMenuButton asChild isActive={item.isActive}>
-                    <Link href={item.url}>
-                      <item.icon />
-                      <span>{item.title}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
+        <Collapsible defaultOpen className="group/collapsible">
+          <SidebarGroup>
+            <SidebarGroupLabel asChild>
+              <CollapsibleTrigger>
+                Workspace
+                <ChevronDown className="ml-auto size-4 transition-transform group-data-[state=open]/collapsible:rotate-180" />
+              </CollapsibleTrigger>
+            </SidebarGroupLabel>
+            <CollapsibleContent>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {navWorkspace
+                    .filter((item) => item.visible !== false)
+                    .map((item) => (
+                      <SidebarMenuItem key={item.title}>
+                        {item.items ? (
+                          <SidebarMenuItem>
+                            <div className="flex w-full items-center gap-2 overflow-hidden rounded-md py-1.5 px-2 text-left text-[13px] text-zinc-700 dark:text-zinc-300">
+                              <item.icon className="size-4 shrink-0" />
+                              <span className="font-medium">{item.title}</span>
+                            </div>
+                            <SidebarMenuSub>
+                              {item.items.map((subItem) => (
+                                <SidebarMenuSubItem key={subItem.title}>
+                                  <SidebarMenuSubButton
+                                    asChild
+                                    isActive={subItem.isActive}
+                                    className="text-[13px]"
+                                  >
+                                    <Link href={subItem.url}>
+                                      <span>{subItem.title}</span>
+                                    </Link>
+                                  </SidebarMenuSubButton>
+                                </SidebarMenuSubItem>
+                              ))}
+                            </SidebarMenuSub>
+                          </SidebarMenuItem>
+                        ) : (
+                          <SidebarMenuButton asChild isActive={item.isActive}>
+                            <Link href={item.url!}>
+                              <item.icon />
+                              <span>{item.title}</span>
+                            </Link>
+                          </SidebarMenuButton>
+                        )}
+                      </SidebarMenuItem>
+                    ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </CollapsibleContent>
+          </SidebarGroup>
+        </Collapsible>
       </SidebarContent>
       <SidebarFooter>
         <SidebarUserNav />

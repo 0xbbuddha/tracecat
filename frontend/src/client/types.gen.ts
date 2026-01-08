@@ -33,6 +33,32 @@ export type ActionCreate = {
   control_flow?: ActionControlFlow | null
   is_interactive?: boolean
   interaction?: ResponseInteraction | ApprovalInteraction | null
+  position_x?: number
+  position_y?: number
+  upstream_edges?: Array<ActionEdge>
+}
+
+/**
+ * Represents an incoming edge to an action.
+ *
+ * Stored in Action.upstream_edges to represent incoming connections.
+ */
+export type ActionEdge = {
+  source_id: string
+  source_type: "trigger" | "udf"
+  source_handle?: "success" | "error"
+}
+
+export type source_type = "trigger" | "udf"
+
+export type source_handle = "success" | "error"
+
+/**
+ * Position update for a single action.
+ */
+export type ActionPositionUpdate = {
+  action_id: string
+  position: Position
 }
 
 export type ActionRead = {
@@ -45,6 +71,9 @@ export type ActionRead = {
   control_flow?: ActionControlFlow
   is_interactive: boolean
   interaction?: ResponseInteraction | ApprovalInteraction | null
+  position_x?: number
+  position_y?: number
+  upstream_edges?: Array<ActionEdge>
   readonly ref: string
 }
 
@@ -151,6 +180,9 @@ export type ActionUpdate = {
   control_flow?: ActionControlFlow | null
   is_interactive?: boolean | null
   interaction?: ResponseInteraction | ApprovalInteraction | null
+  position_x?: number | null
+  position_y?: number | null
+  upstream_edges?: Array<ActionEdge> | null
 }
 
 /**
@@ -450,6 +482,20 @@ export type AssigneeChangedEventRead = {
   created_at: string
 }
 
+export type AssistantMessage = {
+  content: Array<TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock>
+  model: string
+  parent_tool_use_id?: string | null
+  error?:
+    | "authentication_failed"
+    | "billing_error"
+    | "rate_limit"
+    | "invalid_request"
+    | "server_error"
+    | "unknown"
+    | null
+}
+
 /**
  * Event for when an attachment is created for a case.
  */
@@ -567,6 +613,14 @@ export type AuthSettingsUpdate = {
    * Session expiration time in seconds.
    */
   auth_session_expire_time_seconds?: number
+}
+
+/**
+ * Batch update for action and trigger positions.
+ */
+export type BatchPositionUpdate = {
+  actions?: Array<ActionPositionUpdate>
+  trigger_position?: Position | null
 }
 
 export type BinaryContent = {
@@ -1301,17 +1355,24 @@ export type ChatEntity =
   | "copilot"
 
 /**
- * Model for chat metadata with a single message.
+ * Model for a chat message with typed message payload.
  */
 export type ChatMessage = {
   /**
-   * Unique chat identifier
+   * Unique message identifier
    */
   id: string
   /**
-   * The message from the chat
+   * The deserialized message
    */
-  message: ModelRequest | ModelResponse
+  message:
+    | ModelRequest
+    | ModelResponse
+    | UserMessage
+    | AssistantMessage
+    | SystemMessage
+    | ResultMessage
+    | StreamEvent
 }
 
 /**
@@ -1737,6 +1798,20 @@ export type DSLRunArgs = {
    * The schedule ID that triggered this workflow, if any. Auto-converts from legacy 'sch-<hex>' format.
    */
   schedule_id?: string | null
+  /**
+   * Execution type (draft or published). Draft executions use draft aliases for child workflows.
+   */
+  execution_type?: ExecutionType
+  /**
+   * The workflow's logical time anchor for FN.now() and related functions. If not provided, computed from TemporalScheduledStartTime (for schedules) or workflow start_time (for other triggers). Stored as UTC.
+   */
+  time_anchor?: string | null
+  /**
+   * Registry version lock for action execution. Maps action names to version hashes.
+   */
+  registry_lock?: {
+    [key: string]: string
+  } | null
 }
 
 /**
@@ -1924,6 +1999,13 @@ export type EventGroup_TypeVar_ = {
   related_wf_exec_id?: string | null
 }
 
+/**
+ * Execution type for a workflow execution.
+ *
+ * Distinguishes between draft (development) and published (production) executions.
+ */
+export type ExecutionType = "draft" | "published"
+
 export type ExpectedField = {
   type: string
   description?: string | null
@@ -1993,6 +2075,8 @@ export type FeatureFlag =
   | "agent-presets"
   | "case-durations"
   | "case-tasks"
+  | "executor-auth"
+  | "registry-client"
   | "registry-sync-v2"
 
 /**
@@ -2223,6 +2307,75 @@ export type GitSettingsUpdate = {
   git_allowed_domains?: Array<string>
   git_repo_url?: string | null
   git_repo_package_name?: string | null
+}
+
+/**
+ * A single graph operation.
+ */
+export type GraphOperation = {
+  type: GraphOperationType
+  /**
+   * Operation-specific payload
+   */
+  payload: {
+    [key: string]: unknown
+  }
+}
+
+/**
+ * Graph operation types.
+ */
+export type GraphOperationType =
+  | "add_node"
+  | "update_node"
+  | "delete_node"
+  | "add_edge"
+  | "delete_edge"
+  | "move_nodes"
+  | "update_trigger_position"
+  | "update_viewport"
+
+/**
+ * Request for PATCH /workflows/{id}/graph.
+ *
+ * Applies a batch of graph operations with optimistic concurrency.
+ */
+export type GraphOperationsRequest = {
+  /**
+   * Expected current graph_version. Returns 409 if mismatched.
+   */
+  base_version: number
+  /**
+   * List of operations to apply atomically
+   */
+  operations: Array<GraphOperation>
+}
+
+/**
+ * Response for GET /workflows/{id}/graph.
+ *
+ * Returns the canonical graph projection from Actions.
+ */
+export type GraphResponse = {
+  /**
+   * Graph version for optimistic concurrency
+   */
+  version: number
+  /**
+   * React Flow nodes
+   */
+  nodes: Array<{
+    [key: string]: unknown
+  }>
+  /**
+   * React Flow edges
+   */
+  edges: Array<{
+    [key: string]: unknown
+  }>
+  viewport?: {
+    [key: string]: unknown
+  }
 }
 
 export type HTTPValidationError = {
@@ -2781,6 +2934,11 @@ export type PayloadChangedEventRead = {
   created_at: string
 }
 
+export type Position = {
+  x?: number
+  y?: number
+}
+
 /**
  * Event for when a case priority is changed.
  */
@@ -2879,10 +3037,6 @@ export type ProviderMetadata = {
    * Whether this provider requires additional configuration
    */
   requires_config?: boolean
-  /**
-   * Step-by-step instructions for setting up the provider
-   */
-  setup_steps?: Array<string>
   /**
    * Whether this provider is available for use
    */
@@ -3422,6 +3576,21 @@ export type ResponseInteraction = {
   timeout?: number | null
 }
 
+export type ResultMessage = {
+  subtype: string
+  duration_ms: number
+  duration_api_ms: number
+  is_error: boolean
+  num_turns: number
+  session_id: string
+  total_cost_usd?: number | null
+  usage?: {
+    [key: string]: unknown
+  } | null
+  result?: string | null
+  structured_output?: unknown
+}
+
 export type RetryPromptPart = {
   content: Array<ErrorDetails> | string
   tool_name?: string | null
@@ -3498,6 +3667,9 @@ export type RunActionInput = {
   interaction_context?: InteractionContext | null
   stream_id?: string
   session_id?: string | null
+  registry_lock?: {
+    [key: string]: string
+  } | null
 }
 
 /**
@@ -3638,6 +3810,8 @@ export type ScheduleUpdate = {
  * - `custom`: Arbitrary user-defined types
  * - `token`: A token, e.g. API Key, JWT Token (TBC)
  * - `oauth2`: OAuth2 Client Credentials (TBC)
+ * - `mtls`: TLS client certificate and key
+ * - `ca-cert`: Certificate authority bundle
  */
 export type SecretCreate = {
   type?: SecretType
@@ -3648,6 +3822,18 @@ export type SecretCreate = {
     [key: string]: string
   } | null
   environment?: string
+}
+
+/**
+ * Aggregated secret definition from registry actions.
+ */
+export type SecretDefinition = {
+  name: string
+  keys: Array<string>
+  optional_keys?: Array<string> | null
+  optional?: boolean
+  actions: Array<string>
+  action_count: number
 }
 
 export type SecretKeyValue = {
@@ -3685,7 +3871,12 @@ export type SecretReadMinimal = {
 /**
  * The type of a secret.
  */
-export type SecretType = "custom" | "ssh-key" | "github-app"
+export type SecretType =
+  | "custom"
+  | "ssh-key"
+  | "mtls"
+  | "ca-cert"
+  | "github-app"
 
 /**
  * Update a secret.
@@ -3695,6 +3886,8 @@ export type SecretType = "custom" | "ssh-key" | "github-app"
  * - `custom`: Arbitrary user-defined types
  * - `token`: A token, e.g. API Key, JWT Token (TBC)
  * - `oauth2`: OAuth2 Client Credentials (TBC)
+ * - `mtls`: TLS client certificate and key
+ * - `ca-cert`: Certificate authority bundle
  */
 export type SecretUpdate = {
   type?: SecretType | null
@@ -3848,11 +4041,27 @@ export type StepStartUIPart = {
   type: "step-start"
 }
 
+export type StreamEvent = {
+  uuid: string
+  session_id: string
+  event: {
+    [key: string]: unknown
+  }
+  parent_tool_use_id?: string | null
+}
+
 export type SyntaxToken = {
   type: string
   value: string
   start: number
   end: number
+}
+
+export type SystemMessage = {
+  subtype: string
+  data: {
+    [key: string]: unknown
+  }
 }
 
 export type SystemPromptPart = {
@@ -4383,6 +4592,10 @@ export type TextArea = {
   placeholder?: string
 }
 
+export type TextBlock = {
+  text: string
+}
+
 export type TextPart = {
   content: string
   id?: string | null
@@ -4412,6 +4625,11 @@ export type TextUIPart = {
       [key: string]: unknown
     }
   }
+}
+
+export type ThinkingBlock = {
+  thinking: string
+  signature: string
 }
 
 export type ThinkingPart = {
@@ -4482,6 +4700,17 @@ export type ToolCallPartDelta = {
 export type ToolDenied = {
   message?: string
   kind?: "tool-denied"
+}
+
+export type ToolResultBlock = {
+  tool_use_id: string
+  content?:
+    | string
+    | Array<{
+        [key: string]: unknown
+      }>
+    | null
+  is_error?: boolean | null
 }
 
 export type ToolReturn = {
@@ -4568,6 +4797,14 @@ export type ToolUIPartOutputError = {
   }
 }
 
+export type ToolUseBlock = {
+  id: string
+  name: string
+  input: {
+    [key: string]: unknown
+  }
+}
+
 export type Trigger = {
   type: "schedule" | "webhook"
   ref: string
@@ -4642,6 +4879,14 @@ export type UserCreate = {
   is_verified?: boolean | null
   first_name?: string | null
   last_name?: string | null
+}
+
+export type UserMessage = {
+  content:
+    | string
+    | Array<TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock>
+  uuid?: string | null
+  parent_tool_use_id?: string | null
 }
 
 export type UserPromptPart = {
@@ -4973,6 +5218,10 @@ export type WorkflowEventType =
 export type WorkflowExecutionCreate = {
   workflow_id: string
   inputs?: unknown | null
+  /**
+   * Override the workflow's time anchor for FN.now() and related functions. If not provided, computed from TemporalScheduledStartTime (for schedules) or workflow start_time (for other triggers).
+   */
+  time_anchor?: string | null
 }
 
 export type WorkflowExecutionCreateResponse = {
@@ -5067,6 +5316,10 @@ export type WorkflowExecutionRead = {
   parent_wf_exec_id?: string | null
   trigger_type: TriggerType
   /**
+   * Execution type (draft or published). Draft uses the draft workflow graph.
+   */
+  execution_type?: ExecutionType
+  /**
    * The events in the workflow execution
    */
   events: Array<WorkflowExecutionEvent>
@@ -5123,6 +5376,10 @@ export type WorkflowExecutionReadCompact_Any__Union_AgentOutput__Any___Any_ = {
   parent_wf_exec_id?: string | null
   trigger_type: TriggerType
   /**
+   * Execution type (draft or published). Draft uses the draft workflow graph.
+   */
+  execution_type?: ExecutionType
+  /**
    * Compact events in the workflow execution
    */
   events: Array<WorkflowExecutionEventCompact_Any__Union_AgentOutput__Any___Any_>
@@ -5169,6 +5426,10 @@ export type WorkflowExecutionReadMinimal = {
   history_length: number
   parent_wf_exec_id?: string | null
   trigger_type: TriggerType
+  /**
+   * Execution type (draft or published). Draft uses the draft workflow graph.
+   */
+  execution_type?: ExecutionType
 }
 
 /**
@@ -5220,9 +5481,6 @@ export type WorkflowRead = {
   actions: {
     [key: string]: ActionRead
   }
-  object: {
-    [key: string]: unknown
-  } | null
   workspace_id: string
   version?: number | null
   webhook: WebhookRead
@@ -5238,6 +5496,9 @@ export type WorkflowRead = {
   config: DSLConfig_Output | null
   alias?: string | null
   error_handler?: string | null
+  trigger_position_x?: number
+  trigger_position_y?: number
+  graph_version?: number
 }
 
 /**
@@ -5293,9 +5554,6 @@ export type WorkflowUpdate = {
    */
   description?: string | null
   status?: "online" | "offline" | null
-  object?: {
-    [key: string]: unknown
-  } | null
   version?: number | null
   entrypoint?: string | null
   icon_url?: string | null
@@ -5450,6 +5708,14 @@ export type PublicIncomingWebhookWaitData = {
 
 export type PublicIncomingWebhookWaitResponse = unknown
 
+export type PublicIncomingWebhookDraftData = {
+  contentType?: string | null
+  secret: string
+  workflowId: string
+}
+
+export type PublicIncomingWebhookDraftResponse = unknown
+
 export type PublicReceiveInteractionData = {
   category: InteractionCategory
   contentType?: string | null
@@ -5594,6 +5860,10 @@ export type WorkflowsCommitWorkflowResponse = WorkflowCommitResponse
 
 export type WorkflowsExportWorkflowData = {
   /**
+   * Export current draft state instead of saved definition.
+   */
+  draft?: boolean
+  /**
    * Export format: 'json' or 'yaml'
    */
   format?: "json" | "yaml"
@@ -5683,6 +5953,21 @@ export type WorkflowsMoveWorkflowToFolderData = {
 
 export type WorkflowsMoveWorkflowToFolderResponse = void
 
+export type GraphGetGraphData = {
+  workflowId: string
+  workspaceId: string
+}
+
+export type GraphGetGraphResponse = GraphResponse
+
+export type GraphApplyGraphOperationsData = {
+  requestBody: GraphOperationsRequest
+  workflowId: string
+  workspaceId: string
+}
+
+export type GraphApplyGraphOperationsResponse = GraphResponse
+
 export type WorkflowExecutionsListWorkflowExecutionsData = {
   limit?: number | null
   trigger?: Array<TriggerType> | null
@@ -5718,6 +6003,14 @@ export type WorkflowExecutionsGetWorkflowExecutionCompactData = {
 export type WorkflowExecutionsGetWorkflowExecutionCompactResponse =
   WorkflowExecutionReadCompact_Any__Union_AgentOutput__Any___Any_
 
+export type WorkflowExecutionsCreateDraftWorkflowExecutionData = {
+  requestBody: WorkflowExecutionCreate
+  workspaceId: string
+}
+
+export type WorkflowExecutionsCreateDraftWorkflowExecutionResponse =
+  WorkflowExecutionCreateResponse
+
 export type WorkflowExecutionsCancelWorkflowExecutionData = {
   executionId: string
   workspaceId: string
@@ -5732,6 +6025,14 @@ export type WorkflowExecutionsTerminateWorkflowExecutionData = {
 }
 
 export type WorkflowExecutionsTerminateWorkflowExecutionResponse = void
+
+export type ActionsBatchUpdatePositionsData = {
+  requestBody: BatchPositionUpdate
+  workflowId: string
+  workspaceId: string
+}
+
+export type ActionsBatchUpdatePositionsResponse = void
 
 export type ActionsListActionsData = {
   workflowId: string
@@ -5859,6 +6160,12 @@ export type SecretsCreateSecretData = {
 }
 
 export type SecretsCreateSecretResponse = unknown
+
+export type SecretsListSecretDefinitionsData = {
+  workspaceId: string
+}
+
+export type SecretsListSecretDefinitionsResponse = Array<SecretDefinition>
 
 export type SecretsGetSecretByNameData = {
   secretName: string
@@ -6946,6 +7253,13 @@ export type ChatUpdateChatData = {
 
 export type ChatUpdateChatResponse = ChatReadMinimal
 
+export type ChatDeleteChatData = {
+  chatId: string
+  workspaceId: string
+}
+
+export type ChatDeleteChatResponse = void
+
 export type ChatGetChatVercelData = {
   chatId: string
   workspaceId: string
@@ -7327,6 +7641,21 @@ export type $OpenApiTs = {
   "/webhooks/{workflow_id}/{secret}/wait": {
     post: {
       req: PublicIncomingWebhookWaitData
+      res: {
+        /**
+         * Successful Response
+         */
+        200: unknown
+        /**
+         * Validation Error
+         */
+        422: HTTPValidationError
+      }
+    }
+  }
+  "/webhooks/{workflow_id}/{secret}/draft": {
+    post: {
+      req: PublicIncomingWebhookDraftData
       res: {
         /**
          * Successful Response
@@ -7773,6 +8102,34 @@ export type $OpenApiTs = {
       }
     }
   }
+  "/workflows/{workflow_id}/graph": {
+    get: {
+      req: GraphGetGraphData
+      res: {
+        /**
+         * Successful Response
+         */
+        200: GraphResponse
+        /**
+         * Validation Error
+         */
+        422: HTTPValidationError
+      }
+    }
+    patch: {
+      req: GraphApplyGraphOperationsData
+      res: {
+        /**
+         * Successful Response
+         */
+        200: GraphResponse
+        /**
+         * Validation Error
+         */
+        422: HTTPValidationError
+      }
+    }
+  }
   "/workflow-executions": {
     get: {
       req: WorkflowExecutionsListWorkflowExecutionsData
@@ -7831,6 +8188,21 @@ export type $OpenApiTs = {
       }
     }
   }
+  "/workflow-executions/draft": {
+    post: {
+      req: WorkflowExecutionsCreateDraftWorkflowExecutionData
+      res: {
+        /**
+         * Successful Response
+         */
+        200: WorkflowExecutionCreateResponse
+        /**
+         * Validation Error
+         */
+        422: HTTPValidationError
+      }
+    }
+  }
   "/workflow-executions/{execution_id}/cancel": {
     post: {
       req: WorkflowExecutionsCancelWorkflowExecutionData
@@ -7849,6 +8221,21 @@ export type $OpenApiTs = {
   "/workflow-executions/{execution_id}/terminate": {
     post: {
       req: WorkflowExecutionsTerminateWorkflowExecutionData
+      res: {
+        /**
+         * Successful Response
+         */
+        204: void
+        /**
+         * Validation Error
+         */
+        422: HTTPValidationError
+      }
+    }
+  }
+  "/actions/batch-positions": {
+    post: {
+      req: ActionsBatchUpdatePositionsData
       res: {
         /**
          * Successful Response
@@ -8054,6 +8441,21 @@ export type $OpenApiTs = {
          * Successful Response
          */
         201: unknown
+        /**
+         * Validation Error
+         */
+        422: HTTPValidationError
+      }
+    }
+  }
+  "/secrets/definitions": {
+    get: {
+      req: SecretsListSecretDefinitionsData
+      res: {
+        /**
+         * Successful Response
+         */
+        200: Array<SecretDefinition>
         /**
          * Validation Error
          */
@@ -9998,6 +10400,19 @@ export type $OpenApiTs = {
          * Successful Response
          */
         200: ChatReadMinimal
+        /**
+         * Validation Error
+         */
+        422: HTTPValidationError
+      }
+    }
+    delete: {
+      req: ChatDeleteChatData
+      res: {
+        /**
+         * Successful Response
+         */
+        204: void
         /**
          * Validation Error
          */

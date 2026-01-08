@@ -4,20 +4,17 @@ from __future__ import annotations
 
 import uuid
 
-import yaml
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from tracecat.db.models import Action, Tag, Webhook, Workflow, WorkflowTag
+from tracecat.db.models import Tag, Webhook, Workflow, WorkflowTag
 from tracecat.dsl.common import DSLInput
 from tracecat.dsl.enums import PlatformAction
-from tracecat.dsl.view import RFGraph
 from tracecat.exceptions import TracecatAuthorizationError
-from tracecat.identifiers.workflow import WorkflowID, WorkflowUUID
+from tracecat.identifiers.workflow import WorkflowUUID
 from tracecat.logger import logger
 from tracecat.service import BaseWorkspaceService
 from tracecat.sync import PullDiagnostic, PullResult
-from tracecat.workflow.actions.schemas import ActionControlFlow
 from tracecat.workflow.management.definitions import WorkflowDefinitionsService
 from tracecat.workflow.management.folders.service import WorkflowFolderService
 from tracecat.workflow.management.management import WorkflowsManagementService
@@ -293,7 +290,7 @@ class WorkflowImportService(BaseWorkspaceService):
         defn_service = WorkflowDefinitionsService(session=self.session, role=self.role)
         wf_id = WorkflowUUID.new(existing_workflow.id)
         defn = await defn_service.create_workflow_definition(
-            wf_id, remote_workflow.definition, commit=False
+            wf_id, remote_workflow.definition, alias=remote_workflow.alias, commit=False
         )
 
         # 2. Update workflow metadata
@@ -311,20 +308,10 @@ class WorkflowImportService(BaseWorkspaceService):
 
         # 4. Recreate actions from DSL
         dsl = remote_workflow.definition
-        wf_id = WorkflowUUID.new(existing_workflow.id)
-        actions = await self._create_actions_from_dsl(dsl, wf_id)
+        actions = await self.wf_mgmt.create_actions_from_dsl(dsl, existing_workflow.id)
         existing_workflow.actions = actions
 
-        # Ensure IDs are generated before regenerating the graph
-        await self.session.flush()
-
-        # 5. Regenerate the React Flow graph
-        base_graph = RFGraph.with_defaults(existing_workflow)
-        ref2id = {act.ref: str(act.id) for act in actions}
-        updated_graph = dsl.to_graph(trigger_node=base_graph.trigger, ref2id=ref2id)
-        existing_workflow.object = updated_graph.model_dump(by_alias=True, mode="json")
-
-        # 6. Update folder if specified
+        # 5. Update folder if specified
         if remote_workflow.folder_path:
             folder_id = await self._ensure_folder_exists(remote_workflow.folder_path)
             existing_workflow.folder_id = folder_id
@@ -332,7 +319,7 @@ class WorkflowImportService(BaseWorkspaceService):
             # If folder_path is explicitly None, remove from folder
             existing_workflow.folder_id = None
 
-        # 7. Update related entities
+        # 6. Update related entities
         await self._update_schedules(existing_workflow, remote_workflow.schedules)
         await self._update_webhook(existing_workflow.webhook, remote_workflow.webhook)
         await self._update_tags(existing_workflow, remote_workflow.tags)
@@ -361,7 +348,9 @@ class WorkflowImportService(BaseWorkspaceService):
 
         # Create WorkflowDefinition (versioned)
         defn_service = WorkflowDefinitionsService(session=self.session, role=self.role)
-        defn = await defn_service.create_workflow_definition(wf_id, dsl, commit=False)
+        defn = await defn_service.create_workflow_definition(
+            wf_id, dsl, alias=remote_defn.alias, commit=False
+        )
 
         # Update workflow version to match definition
         workflow.version = defn.version
@@ -485,33 +474,6 @@ class WorkflowImportService(BaseWorkspaceService):
             self.session.add(tag)
 
         return tag
-
-    async def _create_actions_from_dsl(
-        self, dsl: DSLInput, workflow_id: WorkflowID
-    ) -> list[Action]:
-        """Create actions from DSL for a workflow."""
-        actions: list[Action] = []
-        for act_stmt in dsl.actions:
-            control_flow = ActionControlFlow(
-                run_if=act_stmt.run_if,
-                for_each=act_stmt.for_each,
-                retry_policy=act_stmt.retry_policy,
-                start_delay=act_stmt.start_delay,
-                wait_until=act_stmt.wait_until,
-                join_strategy=act_stmt.join_strategy,
-            )
-            new_action = Action(
-                workspace_id=self.workspace_id,
-                workflow_id=workflow_id,
-                type=act_stmt.action,
-                inputs=yaml.dump(act_stmt.args),
-                title=act_stmt.title,
-                description=act_stmt.description,
-                control_flow=control_flow.model_dump(),
-            )
-            actions.append(new_action)
-            self.session.add(new_action)
-        return actions
 
     def _generate_tag_color(self) -> str:
         """Generate a default color for new tags."""

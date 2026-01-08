@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
+from typing import TYPE_CHECKING, TypedDict
+from typing import cast as typing_cast
 
 from pydantic import UUID4, ValidationError
 from pydantic_core import ErrorDetails, to_jsonable_python
 from sqlalchemy import Boolean, cast, func, or_, select
-from tracecat_registry import RegistrySecretType, RegistrySecretTypeValidator
+from tracecat_registry import (
+    RegistryOAuthSecret,
+    RegistrySecretType,
+    RegistrySecretTypeValidator,
+)
 
 from tracecat import config
 from tracecat.db.models import RegistryAction, RegistryRepository
@@ -16,29 +22,45 @@ from tracecat.exceptions import (
     RegistryValidationError,
 )
 from tracecat.expressions.eval import extract_expressions
+from tracecat.expressions.expectations import create_expectation_model
 from tracecat.expressions.validator.validator import (
     TemplateActionExprValidator,
     TemplateActionValidationContext,
 )
 from tracecat.logger import logger
+from tracecat.registry.actions.bound import BoundRegistryAction
 from tracecat.registry.actions.enums import (
     TemplateActionValidationErrorType,
 )
 from tracecat.registry.actions.schemas import (
-    BoundRegistryAction,
+    AnnotatedRegistryActionImpl,
     RegistryActionCreate,
     RegistryActionImplValidator,
+    RegistryActionInterface,
+    RegistryActionOptions,
     RegistryActionRead,
+    RegistryActionType,
     RegistryActionUpdate,
     RegistryActionValidationErrorInfo,
-    model_converters,
+    TemplateAction,
 )
 from tracecat.registry.loaders import LoaderMode, get_bound_action_impl
 from tracecat.registry.repository import Repository
 from tracecat.registry.sync.service import RegistrySyncService
 from tracecat.registry.sync.subprocess import fetch_actions_from_subprocess
+from tracecat.secrets.schemas import SecretDefinition
 from tracecat.service import BaseService
 from tracecat.settings.service import get_setting_cached
+
+if TYPE_CHECKING:
+    from tracecat.ssh import SshEnv
+
+
+class SecretAggregate(TypedDict):
+    keys: set[str]
+    optional_keys: set[str]
+    optional: bool
+    actions: set[str]
 
 
 class RegistryActionsService(BaseService):
@@ -78,6 +100,77 @@ class RegistryActionsService(BaseService):
         result = await self.session.execute(statement)
         return result.scalars().all()
 
+    async def get_aggregated_secrets(self) -> list[SecretDefinition]:
+        organization_id = (
+            self.role.organization_id
+            if self.role is not None
+            else config.TRACECAT__DEFAULT_ORG_ID
+        )
+        statement = select(RegistryAction).where(
+            RegistryAction.organization_id == organization_id,
+            RegistryAction.secrets.is_not(None),
+        )
+        result = await self.session.execute(statement)
+        actions = result.scalars().all()
+
+        aggregated: dict[str, SecretAggregate] = {}
+
+        for action in actions:
+            if not action.secrets:
+                continue
+            action_name = action.action
+            for raw_secret in action.secrets:
+                try:
+                    secret = RegistrySecretTypeValidator.validate_python(raw_secret)
+                except ValidationError as exc:
+                    self.logger.warning(
+                        "Skipping invalid registry secret",
+                        action=action_name,
+                        error=str(exc),
+                    )
+                    continue
+                if isinstance(secret, RegistryOAuthSecret) or secret.name.endswith(
+                    "_oauth"
+                ):
+                    continue
+
+                entry = aggregated.setdefault(
+                    secret.name,
+                    {
+                        "keys": set(),
+                        "optional_keys": set(),
+                        "optional": False,
+                        "actions": set(),
+                    },
+                )
+                if secret.keys:
+                    entry["keys"].update(secret.keys)
+                if secret.optional_keys:
+                    entry["optional_keys"].update(secret.optional_keys)
+                entry["optional"] = entry["optional"] or secret.optional
+                entry["actions"].add(action_name)
+
+        definitions: list[SecretDefinition] = []
+        for name, data in aggregated.items():
+            required_keys = sorted(data["keys"])
+            optional_keys = sorted(set(data["optional_keys"]) - set(required_keys))
+            actions = sorted(data["actions"])
+            definitions.append(
+                SecretDefinition(
+                    name=name,
+                    keys=required_keys,
+                    optional_keys=optional_keys or None,
+                    optional=data["optional"],
+                    actions=actions,
+                    action_count=len(actions),
+                )
+            )
+
+        return sorted(
+            definitions,
+            key=lambda definition: (-definition.action_count, definition.name),
+        )
+
     async def get_action(self, action_name: str) -> RegistryAction:
         """Get an action by name."""
         try:
@@ -97,6 +190,38 @@ class RegistryActionsService(BaseService):
         action = result.scalars().one_or_none()
         if not action:
             raise RegistryError(f"Action {namespace}.{name} not found in the registry")
+        return action
+
+    async def get_action_by_impl(self, module: str, name: str) -> RegistryAction:
+        """Get an action by its implementation module and function name.
+
+        This is used when we have the action_impl metadata (module path and function name)
+        but need to load the registry action for execution.
+
+        Args:
+            module: The module path (e.g., 'tracecat_registry.integrations.core.transform')
+            name: The function name (e.g., 'reshape')
+
+        Returns:
+            The registry action matching the implementation.
+
+        Raises:
+            RegistryError: If no action with matching implementation is found.
+        """
+        # Query for UDF actions that match the module and function name
+        statement = select(RegistryAction).where(
+            RegistryAction.organization_id == config.TRACECAT__DEFAULT_ORG_ID,
+            RegistryAction.implementation["type"].astext == "udf",
+            RegistryAction.implementation["module"].astext == module,
+            RegistryAction.implementation["name"].astext == name,
+        )
+        result = await self.session.execute(statement)
+        action = result.scalars().first()
+        if not action:
+            raise RegistryError(
+                f"Action with implementation {module}.{name} not found in the registry",
+                detail={"module": module, "name": name},
+            )
         return action
 
     async def get_actions(self, action_names: list[str]) -> Sequence[RegistryAction]:
@@ -129,9 +254,7 @@ class RegistryActionsService(BaseService):
 
         # Interface
         if params.implementation.type == "template":
-            interface = model_converters.implementation_to_interface(
-                params.implementation
-            )
+            interface = _implementation_to_interface(params.implementation)
         else:
             interface = params.interface
 
@@ -316,6 +439,7 @@ class RegistryActionsService(BaseService):
         target_version: str | None = None,
         target_commit_sha: str | None = None,
         allow_delete_all: bool = False,
+        ssh_env: SshEnv | None = None,
     ) -> tuple[str | None, str | None]:
         """Sync actions from a repository using the v2 versioned flow.
 
@@ -331,6 +455,7 @@ class RegistryActionsService(BaseService):
             target_version: Version string (auto-generated if not provided).
             target_commit_sha: Optional commit SHA to sync to.
             allow_delete_all: If True, allow deleting all actions if list is empty.
+            ssh_env: SSH environment for git operations (required for git+ssh repos).
 
         Returns:
             Tuple of (commit_sha, version_string)
@@ -351,6 +476,7 @@ class RegistryActionsService(BaseService):
                     db_repo=db_repo,
                     target_version=target_version,
                     target_commit_sha=target_commit_sha,
+                    ssh_env=ssh_env,
                     commit=False,
                 )
                 # Also update the mutable RegistryAction table for backward compatibility
@@ -367,6 +493,7 @@ class RegistryActionsService(BaseService):
                     db_repo=db_repo,
                     target_version=target_version,
                     target_commit_sha=target_commit_sha,
+                    ssh_env=ssh_env,
                     commit=False,
                 )
                 # Also update the mutable RegistryAction table for backward compatibility
@@ -554,7 +681,36 @@ class RegistryActionsService(BaseService):
         self, action: RegistryAction
     ) -> RegistryActionRead:
         extra_secrets = await self.fetch_all_action_secrets(action)
-        return RegistryActionRead.from_database(action, list(extra_secrets))
+        impl = RegistryActionImplValidator.validate_python(action.implementation)
+        secrets = {
+            RegistrySecretTypeValidator.validate_python(secret)
+            for secret in action.secrets or []
+        }
+        if extra_secrets:
+            secrets.update(extra_secrets)
+        return RegistryActionRead(
+            id=action.id,
+            repository_id=action.repository_id,
+            name=action.name,
+            description=action.description,
+            namespace=action.namespace,
+            type=typing_cast(RegistryActionType, action.type),
+            doc_url=action.doc_url,
+            author=action.author,
+            deprecated=action.deprecated,
+            interface=_db_to_interface(action),
+            implementation=impl,
+            default_title=action.default_title,
+            display_group=action.display_group,
+            origin=action.origin,
+            options=RegistryActionOptions(**action.options),
+            secrets=sorted(
+                secrets,
+                key=lambda x: x.provider_id
+                if isinstance(x, RegistryOAuthSecret)
+                else x.name,
+            ),
+        )
 
     async def fetch_all_action_secrets(
         self, action: RegistryAction
@@ -619,6 +775,7 @@ async def validate_action_template(
     *,
     check_db: bool = False,
     ra_service: RegistryActionsService | None = None,
+    extra_repos: Sequence[Repository] | None = None,
 ) -> list[RegistryActionValidationErrorInfo]:
     """Validate that a template action is correctly formatted."""
     if not (action.is_template and action.template_action):
@@ -629,6 +786,15 @@ async def validate_action_template(
     log = ra_service.logger if ra_service else logger
 
     defn = action.template_action.definition
+
+    def lookup_extra_action(action_name: str) -> BoundRegistryAction | None:
+        if not extra_repos:
+            return None
+        for extra_repo in extra_repos:
+            if action_name in extra_repo.store:
+                return extra_repo.store[action_name]
+        return None
+
     # 1. Validate template steps
     for step in defn.steps:
         # (A) Ensure that the step action type exists
@@ -636,6 +802,8 @@ async def validate_action_template(
             # If this action is already in the repo, we can just use it
             # We will overwrite the action in the DB anyways
             bound_action = repo.store[step.action]
+        elif (extra_action := lookup_extra_action(step.action)) is not None:
+            bound_action = extra_action
         elif (
             check_db
             and ra_service
@@ -705,3 +873,41 @@ async def validate_action_template(
     )
 
     return val_errs
+
+
+def _implementation_to_interface(
+    impl: AnnotatedRegistryActionImpl,
+) -> RegistryActionInterface:
+    if impl.type == "template":
+        expects = create_expectation_model(
+            schema=impl.template_action.definition.expects,
+            model_name=impl.template_action.definition.action.replace(".", "__"),
+        )
+        return RegistryActionInterface(
+            expects=expects.model_json_schema(),
+            returns=impl.template_action.definition.returns,
+        )
+    else:
+        return RegistryActionInterface(expects={}, returns={})
+
+
+def _db_to_interface(action: RegistryAction) -> RegistryActionInterface:
+    match action.implementation:
+        case {"type": "template", "template_action": template_action}:
+            template = TemplateAction.model_validate(template_action)
+            expects = create_expectation_model(
+                template.definition.expects,
+                template.definition.action.replace(".", "__"),
+            )
+            intf = RegistryActionInterface(
+                expects=expects.model_json_schema(),
+                returns=template.definition.returns,
+            )
+        case {"type": "udf", **_kwargs}:
+            intf = RegistryActionInterface(
+                expects=action.interface.get("expects", {}),
+                returns=action.interface.get("returns", {}),
+            )
+        case _:
+            raise ValueError(f"Unknown implementation type: {action.implementation}")
+    return intf

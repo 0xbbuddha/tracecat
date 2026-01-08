@@ -3,7 +3,6 @@
 import { zodResolver } from "@hookform/resolvers/zod"
 import {
   AlertCircle,
-  Bot,
   Box,
   Braces,
   Brackets,
@@ -23,7 +22,7 @@ import {
   Type,
 } from "lucide-react"
 import Link from "next/link"
-import { usePathname, useRouter, useSearchParams } from "next/navigation"
+import { useRouter } from "next/navigation"
 import {
   type MouseEvent,
   useCallback,
@@ -37,7 +36,6 @@ import { z } from "zod"
 import type {
   AgentPresetCreate,
   AgentPresetRead,
-  AgentPresetReadMinimal,
   AgentPresetUpdate,
 } from "@/client"
 import { ActionSelect } from "@/components/chat/action-select"
@@ -59,7 +57,6 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -69,7 +66,6 @@ import {
 } from "@/components/ui/dropdown-menu"
 import {
   Empty,
-  EmptyContent,
   EmptyDescription,
   EmptyHeader,
   EmptyMedia,
@@ -99,14 +95,7 @@ import {
 } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Switch } from "@/components/ui/switch"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
 import {
   useAgentPreset,
   useAgentPresets,
@@ -253,8 +242,6 @@ const DEFAULT_FORM_VALUES: AgentPresetFormValues = {
 
 export function AgentPresetsBuilder({ presetId }: { presetId?: string }) {
   const router = useRouter()
-  const pathname = usePathname()
-  const searchParams = useSearchParams()
   const workspaceId = useWorkspaceId()
   const { isFeatureEnabled, isLoading: featureFlagsLoading } = useFeatureFlag()
   const agentPresetsEnabled = isFeatureEnabled("agent-presets")
@@ -286,8 +273,6 @@ export function AgentPresetsBuilder({ presetId }: { presetId?: string }) {
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [mcpIntegrations])
 
-  const currentTab = searchParams?.get("tab") === "chat" ? "chat" : "presets"
-
   const { createAgentPreset, createAgentPresetIsPending } =
     useCreateAgentPreset(workspaceId)
   const { updateAgentPreset, updateAgentPresetIsPending } =
@@ -305,20 +290,15 @@ export function AgentPresetsBuilder({ presetId }: { presetId?: string }) {
         return
       }
       const nextPath = `/workspaces/${workspaceId}/agents/${normalizedId}`
-      const params = new URLSearchParams(searchParams?.toString())
-      params.set("tab", currentTab)
-      const url = params.toString()
-        ? `${nextPath}?${params.toString()}`
-        : nextPath
-      router.replace(url)
+      router.replace(nextPath)
     },
-    [activePresetId, router, searchParams, currentTab, workspaceId]
+    [activePresetId, router, workspaceId]
   )
 
   // Fetch full preset data when a preset is selected (not in create mode)
   const selectedPresetId =
     activePresetId === NEW_PRESET_ID ? null : activePresetId
-  const { preset: selectedPreset, presetIsLoading } = useAgentPreset(
+  const { preset: selectedPreset } = useAgentPreset(
     workspaceId,
     selectedPresetId,
     {
@@ -345,23 +325,6 @@ export function AgentPresetsBuilder({ presetId }: { presetId?: string }) {
       handleSetSelectedPresetId(NEW_PRESET_ID)
     }
   }, [presets, handleSetSelectedPresetId, presetId, presetsIsLoading])
-
-  const chatTabDisabled =
-    !selectedPreset && !presetIsLoading && !featureFlagsLoading
-
-  useEffect(() => {
-    if (chatTabDisabled && currentTab === "chat") {
-      if (!pathname) {
-        return
-      }
-      const params = new URLSearchParams(searchParams?.toString())
-      params.set("tab", "presets")
-      const url = params.toString()
-        ? `${pathname}?${params.toString()}`
-        : pathname
-      router.replace(url)
-    }
-  }, [chatTabDisabled, pathname, router, searchParams, currentTab])
 
   const actionSuggestions: Suggestion[] = useMemo(() => {
     if (!registryActions) {
@@ -451,66 +414,10 @@ export function AgentPresetsBuilder({ presetId }: { presetId?: string }) {
     <div className="flex h-full w-full flex-col overflow-hidden">
       <ResizablePanelGroup direction="horizontal">
         <ResizablePanel defaultSize={26} minSize={18}>
-          <div className="flex h-full flex-col border-r bg-muted/40">
-            <Tabs
-              value={currentTab}
-              onValueChange={(value) => {
-                if (value === "chat" && chatTabDisabled) {
-                  return
-                }
-                if (!pathname) {
-                  return
-                }
-                const nextTab = value as "presets" | "chat"
-                const params = new URLSearchParams(searchParams?.toString())
-                params.set("tab", nextTab)
-                const url = params.toString()
-                  ? `${pathname}?${params.toString()}`
-                  : pathname
-                router.replace(url)
-              }}
-              className="flex h-full flex-col"
-            >
-              <div className="px-3 pt-3">
-                <TabsList className="grid w-full grid-cols-2">
-                  <TabsTrigger value="presets" disableUnderline>
-                    <Bot className="mr-1.5 h-3.5 w-3.5" />
-                    Agents
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="chat"
-                    disabled={chatTabDisabled}
-                    disableUnderline
-                  >
-                    <MessageCircle className="mr-1.5 h-3.5 w-3.5" />
-                    Live chat
-                  </TabsTrigger>
-                </TabsList>
-              </div>
-              <div className="flex-1 min-h-0">
-                <TabsContent
-                  value="presets"
-                  className="h-full flex-col px-0 py-0 data-[state=active]:flex data-[state=inactive]:hidden"
-                >
-                  <PresetsSidebar
-                    presets={presets ?? []}
-                    selectedId={activePresetId}
-                    workspaceId={workspaceId}
-                    onCreate={() => handleSetSelectedPresetId(NEW_PRESET_ID)}
-                  />
-                </TabsContent>
-                <TabsContent
-                  value="chat"
-                  className="h-full flex-col px-0 py-0 data-[state=active]:flex data-[state=inactive]:hidden"
-                >
-                  <AgentPresetChatPane
-                    preset={selectedPreset ?? null}
-                    workspaceId={workspaceId}
-                  />
-                </TabsContent>
-              </div>
-            </Tabs>
-          </div>
+          <AgentPresetChatPane
+            preset={selectedPreset ?? null}
+            workspaceId={workspaceId}
+          />
         </ResizablePanel>
         <ResizableHandle withHandle />
         <ResizablePanel defaultSize={50} minSize={34}>
@@ -576,141 +483,6 @@ export function AgentPresetsBuilder({ presetId }: { presetId?: string }) {
   )
 }
 
-function PresetsSidebar({
-  presets,
-  selectedId,
-  workspaceId,
-  onCreate,
-}: {
-  presets: AgentPresetReadMinimal[]
-  selectedId: string
-  workspaceId: string
-  onCreate: () => void
-}) {
-  const list = presets
-
-  return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center justify-between border-b px-3 py-2">
-        <div>
-          <p className="text-xs text-muted-foreground">{list.length} agents</p>
-        </div>
-        <Button size="sm" onClick={onCreate} variant="ghost">
-          <Plus className="mr-2 size-4" />
-          New
-        </Button>
-      </div>
-      <div className="flex-1 min-h-0">
-        {list.length === 0 ? (
-          <div className="flex h-full items-center justify-center px-2">
-            <Empty>
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <Bot />
-                </EmptyMedia>
-                <EmptyTitle>No agent preset found.</EmptyTitle>
-                <EmptyDescription>
-                  Create an AI agent preset to reuse across workflows, cases,
-                  and chat.
-                </EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          </div>
-        ) : (
-          <ScrollArea className="h-full">
-            <div className="px-2 py-3 space-y-1">
-              {list.map((preset) => (
-                <SidebarItem
-                  key={preset.id}
-                  href={`/workspaces/${workspaceId}/agents/${preset.id}`}
-                  active={selectedId === preset.id}
-                  title={preset.name}
-                  description={preset.description}
-                  slug={preset.slug}
-                />
-              ))}
-            </div>
-          </ScrollArea>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function SidebarItem({
-  active,
-  href,
-  title,
-  description,
-  slug,
-  status,
-}: {
-  active?: boolean
-  href: string
-  title: string
-  description?: string | null
-  slug?: string
-  status?: string | null
-}) {
-  return (
-    <Link
-      href={href}
-      className={cn(
-        "block w-full rounded-md border px-3 py-2.5 text-left transition-colors",
-        active
-          ? "border-primary bg-primary/10 text-foreground shadow-sm"
-          : "border-transparent bg-background text-foreground hover:border-border hover:bg-accent/50"
-      )}
-    >
-      <div className="flex items-center justify-between text-sm font-medium">
-        <span className="truncate">{title}</span>
-        {slug ? (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Badge
-                  variant="secondary"
-                  className={cn(
-                    "ml-2 shrink-0 text-xs font-normal",
-                    active ? "text-foreground/80" : "text-muted-foreground"
-                  )}
-                >
-                  {slug}
-                </Badge>
-              </TooltipTrigger>
-              <TooltipContent>
-                <p>
-                  Agent preset slug used to identify the preset in workflows.
-                </p>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        ) : status ? (
-          <Badge
-            variant="outline"
-            className={cn(
-              "ml-2 border-muted-foreground/40 text-xs font-normal shrink-0",
-              active ? "text-foreground/80" : "text-muted-foreground"
-            )}
-          >
-            {status}
-          </Badge>
-        ) : null}
-      </div>
-      {description ? (
-        <p
-          className={cn(
-            "mt-1.5 line-clamp-1 text-xs",
-            active ? "text-muted-foreground" : "text-muted-foreground/70"
-          )}
-        >
-          {description}
-        </p>
-      ) : null}
-    </Link>
-  )
-}
-
 function AgentPresetChatPane({
   preset,
   workspaceId,
@@ -766,6 +538,8 @@ function AgentPresetChatPane({
   }, [providersStatus, preset])
 
   const canStartChat = Boolean(preset && providerReady)
+  const shouldAutoCreateChat =
+    canStartChat && !activeChatId && !chatsLoading && !createChatPending
 
   const handleStartChat = async (forceNew = false) => {
     if (!preset || createChatPending || !providerReady) {
@@ -790,6 +564,14 @@ function AgentPresetChatPane({
     }
   }
 
+  // Auto-create chat when preset is ready and no chat exists
+  useEffect(() => {
+    if (shouldAutoCreateChat) {
+      void handleStartChat()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shouldAutoCreateChat])
+
   const handleResetChat = async () => {
     setResetDialogOpen(false)
     await handleStartChat(true)
@@ -797,21 +579,7 @@ function AgentPresetChatPane({
 
   const renderBody = () => {
     if (!preset) {
-      return (
-        <div className="flex h-full items-center justify-center px-4">
-          <Empty>
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <MessageCircle />
-              </EmptyMedia>
-              <EmptyTitle>Select a saved preset</EmptyTitle>
-              <EmptyDescription>
-                Select a saved preset to start a conversation.
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
-        </div>
-      )
+      return null
     }
 
     if (providersStatusLoading) {
@@ -861,37 +629,7 @@ function AgentPresetChatPane({
       )
     }
 
-    if (!activeChatId) {
-      return (
-        <div className="flex h-full items-center justify-center px-4">
-          <Empty>
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <Bot />
-              </EmptyMedia>
-              <EmptyTitle>Live chat</EmptyTitle>
-              <EmptyDescription>
-                Converse with the agent live in a chat session.
-              </EmptyDescription>
-            </EmptyHeader>
-            <EmptyContent>
-              <Button
-                size="sm"
-                onClick={() => void handleStartChat()}
-                disabled={createChatPending || !canStartChat}
-              >
-                {createChatPending ? (
-                  <Loader2 className="mr-1 size-4 animate-spin" />
-                ) : null}
-                Start chat
-              </Button>
-            </EmptyContent>
-          </Empty>
-        </div>
-      )
-    }
-
-    if (chatLoading || chatsLoading || !chat || !modelInfo) {
+    if (!activeChatId || chatLoading || chatsLoading || !chat || !modelInfo) {
       return (
         <div className="flex h-full items-center justify-center">
           <CenteredSpinner />
@@ -936,45 +674,42 @@ function AgentPresetChatPane({
 
   return (
     <div className="flex h-full flex-col bg-background">
-      <div className="flex items-center justify-between border-b px-3 py-2">
-        <div>
-          <p className="text-xs text-muted-foreground">
-            {preset ? `Chat with ${preset.name}` : "Select a preset to begin"}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <AlertDialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
-            <AlertDialogTrigger asChild>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={createChatPending || !canStartChat}
-              >
-                {createChatPending ? (
-                  <Loader2 className="mr-2 size-4 animate-spin" />
-                ) : (
-                  <RotateCcw className="mr-2 size-4" />
-                )}
+      <div className="flex h-10 items-center justify-between border-b px-3">
+        <p className="text-xs text-muted-foreground">
+          {preset ? `Chat with ${preset.name}` : "Live chat"}
+        </p>
+        <AlertDialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
+          <AlertDialogTrigger asChild>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="text-xs"
+              disabled={createChatPending || !canStartChat}
+            >
+              {createChatPending ? (
+                <Loader2 className="mr-2 size-4 animate-spin" />
+              ) : (
+                <RotateCcw className="mr-2 size-4" />
+              )}
+              Reset chat
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Reset this chat?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This will start a new conversation. Your current chat history
+                will no longer be accessible.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={() => void handleResetChat()}>
                 Reset chat
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Reset this chat?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  This will start a new conversation. Your current chat history
-                  will no longer be accessible.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction onClick={() => void handleResetChat()}>
-                  Reset chat
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        </div>
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
       <div className="flex-1 min-h-0">{renderBody()}</div>
     </div>
@@ -1785,6 +1520,8 @@ function AgentPresetBuilderChatPane({
   })
 
   const canStartChat = Boolean(presetId && chatReady && modelInfo)
+  const shouldAutoCreateChat =
+    canStartChat && !activeChatId && !chatsLoading && !createChatPending
 
   const handleStartChat = async (forceNew = false) => {
     if (!preset || !presetId || createChatPending || !chatReady || !modelInfo) {
@@ -1807,6 +1544,14 @@ function AgentPresetBuilderChatPane({
       console.error("Failed to create builder assistant chat", error)
     }
   }
+
+  // Auto-create chat when preset is ready and no chat exists
+  useEffect(() => {
+    if (shouldAutoCreateChat) {
+      void handleStartChat()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shouldAutoCreateChat])
 
   const handleResetChat = async () => {
     if (!canStartChat) {
@@ -1875,18 +1620,6 @@ function AgentPresetBuilderChatPane({
                 assistant.
               </EmptyDescription>
             </EmptyHeader>
-            <EmptyContent>
-              <Button
-                size="sm"
-                onClick={() => void handleStartChat()}
-                disabled={createChatPending || !canStartChat}
-              >
-                {createChatPending ? (
-                  <Loader2 className="mr-2 size-4 animate-spin" />
-                ) : null}
-                Start assistant
-              </Button>
-            </EmptyContent>
           </Empty>
         </div>
       )
@@ -1936,45 +1669,40 @@ function AgentPresetBuilderChatPane({
 
   return (
     <div className="flex h-full flex-col bg-background">
-      <div className="flex items-center justify-between border-b px-3 py-2">
-        <div>
-          <h3 className="text-sm font-semibold">Builder assistant</h3>
-        </div>
-        <div className="flex items-center gap-2">
-          <AlertDialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
-            <AlertDialogTrigger asChild>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={createChatPending || !canStartChat}
-              >
-                {createChatPending ? (
-                  <Loader2 className="mr-2 size-4 animate-spin" />
-                ) : (
-                  <RotateCcw className="mr-2 size-4" />
-                )}
+      <div className="flex h-10 items-center justify-between border-b px-3">
+        <p className="text-xs text-muted-foreground">Builder assistant</p>
+        <AlertDialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
+          <AlertDialogTrigger asChild>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="text-xs"
+              disabled={createChatPending || !canStartChat}
+            >
+              {createChatPending ? (
+                <Loader2 className="mr-2 size-4 animate-spin" />
+              ) : (
+                <RotateCcw className="mr-2 size-4" />
+              )}
+              Reset assistant
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Reset the builder assistant?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This will start a new conversation. Your current chat history
+                will no longer be accessible.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={() => void handleResetChat()}>
                 Reset assistant
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>
-                  Reset the builder assistant?
-                </AlertDialogTitle>
-                <AlertDialogDescription>
-                  This will start a new conversation. Your current chat history
-                  will no longer be accessible.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction onClick={() => void handleResetChat()}>
-                  Reset assistant
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        </div>
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
       <div className="flex-1 min-h-0">{renderBody()}</div>
     </div>

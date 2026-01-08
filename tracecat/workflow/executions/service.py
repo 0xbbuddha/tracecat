@@ -53,6 +53,7 @@ from tracecat.workflow.executions.common import (
 )
 from tracecat.workflow.executions.constants import WF_FAILURE_REF
 from tracecat.workflow.executions.enums import (
+    ExecutionType,
     TemporalSearchAttr,
     TriggerType,
     WorkflowEventType,
@@ -82,6 +83,22 @@ class WorkflowExecutionsService:
         """Initialize and connect to the service."""
         client = await get_temporal_client()
         return WorkflowExecutionsService(client=client, role=role)
+
+    def _handle_background_task_exception(self, task: asyncio.Task[Any]) -> None:
+        """Handle exceptions from background workflow execution tasks.
+
+        This callback is attached to fire-and-forget tasks to ensure exceptions
+        are logged rather than silently lost.
+        """
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            # Log the exception - the workflow failure is already logged in _dispatch_workflow
+            self.logger.debug(
+                "Background workflow execution task completed with exception",
+                exception=str(exc),
+            )
 
     def handle(
         self, wf_exec_id: WorkflowExecutionID
@@ -675,6 +692,8 @@ class WorkflowExecutionsService:
         wf_id: WorkflowID,
         payload: TriggerInputs | None = None,
         trigger_type: TriggerType = TriggerType.MANUAL,
+        time_anchor: datetime.datetime | None = None,
+        registry_lock: dict[str, str] | None = None,
     ) -> WorkflowExecutionCreateResponse:
         """Create a new workflow execution.
 
@@ -687,12 +706,78 @@ class WorkflowExecutionsService:
             payload=payload,
             trigger_type=trigger_type,
             wf_exec_id=wf_exec_id,
+            time_anchor=time_anchor,
+            registry_lock=registry_lock,
         )
-        _ = asyncio.ensure_future(coro)
+        task = asyncio.ensure_future(coro)
+        task.add_done_callback(self._handle_background_task_exception)
         return WorkflowExecutionCreateResponse(
             message="Workflow execution started",
             wf_id=wf_id,
             wf_exec_id=wf_exec_id,
+        )
+
+    def create_draft_workflow_execution_nowait(
+        self,
+        dsl: DSLInput,
+        *,
+        wf_id: WorkflowID,
+        payload: TriggerInputs | None = None,
+        trigger_type: TriggerType = TriggerType.MANUAL,
+        time_anchor: datetime.datetime | None = None,
+        registry_lock: dict[str, str] | None = None,
+    ) -> WorkflowExecutionCreateResponse:
+        """Create a new draft workflow execution.
+
+        Draft executions use the draft workflow graph and resolve aliases from draft workflows.
+        This method schedules the workflow execution and returns immediately.
+        """
+        wf_exec_id = generate_exec_id(wf_id)
+        coro = self.create_draft_workflow_execution(
+            dsl=dsl,
+            wf_id=wf_id,
+            payload=payload,
+            trigger_type=trigger_type,
+            wf_exec_id=wf_exec_id,
+            time_anchor=time_anchor,
+            registry_lock=registry_lock,
+        )
+        task = asyncio.ensure_future(coro)
+        task.add_done_callback(self._handle_background_task_exception)
+        return WorkflowExecutionCreateResponse(
+            message="Draft workflow execution started",
+            wf_id=wf_id,
+            wf_exec_id=wf_exec_id,
+        )
+
+    @audit_log(resource_type="workflow_execution", action="create")
+    async def create_draft_workflow_execution(
+        self,
+        dsl: DSLInput,
+        *,
+        wf_id: WorkflowID,
+        payload: TriggerInputs | None = None,
+        trigger_type: TriggerType = TriggerType.MANUAL,
+        wf_exec_id: WorkflowExecutionID | None = None,
+        time_anchor: datetime.datetime | None = None,
+        registry_lock: dict[str, str] | None = None,
+    ) -> WorkflowDispatchResponse:
+        """Create a new draft workflow execution.
+
+        Note: This method blocks until the workflow execution completes.
+        """
+        if wf_exec_id is None:
+            wf_exec_id = generate_exec_id(wf_id)
+
+        return await self._dispatch_workflow(
+            dsl=dsl,
+            wf_id=wf_id,
+            wf_exec_id=wf_exec_id,
+            trigger_inputs=payload,
+            trigger_type=trigger_type,
+            execution_type=ExecutionType.DRAFT,
+            time_anchor=time_anchor,
+            registry_lock=registry_lock,
         )
 
     @audit_log(resource_type="workflow_execution", action="create")
@@ -704,6 +789,8 @@ class WorkflowExecutionsService:
         payload: TriggerInputs | None = None,
         trigger_type: TriggerType = TriggerType.MANUAL,
         wf_exec_id: WorkflowExecutionID | None = None,
+        time_anchor: datetime.datetime | None = None,
+        registry_lock: dict[str, str] | None = None,
     ) -> WorkflowDispatchResponse:
         """Create a new workflow execution.
 
@@ -718,6 +805,8 @@ class WorkflowExecutionsService:
             wf_exec_id=wf_exec_id,
             trigger_inputs=payload,
             trigger_type=trigger_type,
+            time_anchor=time_anchor,
+            registry_lock=registry_lock,
         )
 
     async def _dispatch_workflow(
@@ -727,6 +816,9 @@ class WorkflowExecutionsService:
         wf_exec_id: WorkflowExecutionID,
         trigger_inputs: TriggerInputs | None = None,
         trigger_type: TriggerType = TriggerType.MANUAL,
+        execution_type: ExecutionType = ExecutionType.PUBLISHED,
+        time_anchor: datetime.datetime | None = None,
+        registry_lock: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> WorkflowDispatchResponse:
         if rpc_timeout := config.TEMPORAL__CLIENT_RPC_TIMEOUT:
@@ -741,6 +833,15 @@ class WorkflowExecutionsService:
         ):
             kwargs["execution_timeout"] = execution_timeout
 
+        # Mint time_anchor for webhook/manual triggers if not explicitly provided.
+        # This ensures the time_anchor is baked into workflow input and survives resets.
+        # Scheduled workflows resolve time_anchor via local activity using TemporalScheduledStartTime.
+        if time_anchor is None and trigger_type in (
+            TriggerType.WEBHOOK,
+            TriggerType.MANUAL,
+        ):
+            time_anchor = datetime.datetime.now(datetime.UTC)
+
         logger.info(
             f"Executing DSL workflow: {dsl.title}",
             role=self.role,
@@ -748,6 +849,8 @@ class WorkflowExecutionsService:
             run_config=dsl.config,
             kwargs=kwargs,
             trigger_type=trigger_type,
+            execution_type=execution_type,
+            registry_lock=registry_lock,
         )
 
         pairs = [trigger_type.to_temporal_search_attr_pair()]
@@ -761,12 +864,20 @@ class WorkflowExecutionsService:
             pairs.append(
                 TemporalSearchAttr.WORKSPACE_ID.create_pair(str(self.role.workspace_id))
             )
+        # Add execution type search attribute
+        pairs.append(execution_type.to_temporal_search_attr_pair())
         search_attrs = TypedSearchAttributes(search_attributes=pairs)
         try:
             result = await self._client.execute_workflow(
                 DSLWorkflow.run,
                 DSLRunArgs(
-                    dsl=dsl, role=self.role, wf_id=wf_id, trigger_inputs=trigger_inputs
+                    dsl=dsl,
+                    role=self.role,
+                    wf_id=wf_id,
+                    trigger_inputs=trigger_inputs,
+                    execution_type=execution_type,
+                    time_anchor=time_anchor,
+                    registry_lock=registry_lock,
                 ),
                 id=wf_exec_id,
                 task_queue=config.TEMPORAL__CLUSTER_QUEUE,

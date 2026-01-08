@@ -16,8 +16,12 @@ from tracecat.dsl.common import (
     create_default_execution_context,
 )
 from tracecat.dsl.schemas import ActionStatement, RunActionInput, RunContext
-from tracecat.exceptions import RegistryValidationError, TracecatCredentialsError
-from tracecat.executor.service import run_action_from_input
+from tracecat.exceptions import (
+    ExecutionError,
+    RegistryValidationError,
+)
+from tracecat.executor.backends.direct import DirectBackend
+from tracecat.executor.service import dispatch_action
 from tracecat.expressions.expectations import ExpectedField
 
 # Add imports for expression validation
@@ -40,6 +44,15 @@ from tracecat.registry.actions.service import (
 from tracecat.registry.repository import Repository
 from tracecat.validation.schemas import ActionValidationResult, ValidationResultType
 from tracecat.validation.service import validate_dsl
+
+
+async def run_action_test(input: RunActionInput, role) -> Any:
+    """Test helper: execute action using production code path."""
+    from tracecat.contexts import ctx_role
+
+    ctx_role.set(role)
+    backend = DirectBackend()
+    return await dispatch_action(backend, input)
 
 
 @pytest.fixture
@@ -632,7 +645,7 @@ async def test_template_action_with_optional_oauth_both_ac_and_cc(
             exec_context=create_default_execution_context(),
             run_context=mock_run_context,
         )
-        return await run_action_from_input(input, test_role)
+        return await run_action_test(input, test_role)
 
     # Test 1: Both credentials present - should work
     svc = IntegrationService(session, role=test_role)
@@ -751,10 +764,11 @@ async def test_template_action_with_optional_oauth_both_ac_and_cc(
     )
 
     # Should raise error when required credential is missing
-    with pytest.raises(TracecatCredentialsError) as exc_info:
-        await run_action_from_input(input_required, test_role)
+    with pytest.raises(ExecutionError) as exc_info:
+        await run_action_test(input_required, test_role)
 
     assert "Missing required OAuth integrations" in str(exc_info.value)
+    assert exc_info.value.info.type == "TracecatCredentialsError"
 
 
 @pytest.mark.integration

@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 import os
+import signal
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
@@ -30,6 +31,7 @@ with workflow.unsafe.imports_passed_through():
     from tracecat.dsl.plugins import TracecatPydanticAIPlugin
     from tracecat.dsl.validation import (
         normalize_trigger_inputs_activity,
+        resolve_time_anchor_activity,
         validate_trigger_inputs_activity,
     )
     from tracecat.dsl.workflow import DSLWorkflow
@@ -75,6 +77,7 @@ def get_activities() -> list[Callable]:
         *WorkflowSchedulesService.get_activities(),
         validate_trigger_inputs_activity,
         normalize_trigger_inputs_activity,
+        resolve_time_anchor_activity,
         *WorkflowsManagementService.get_activities(),
         *InteractionService.get_activities(),
     ]
@@ -87,6 +90,11 @@ def get_activities() -> list[Callable]:
 
 
 async def main() -> None:
+    # Enable workflow replay log filtering for this process
+    from tracecat.logger import _logger
+
+    _logger._is_worker_process = True
+
     client = await get_temporal_client(plugins=[TracecatPydanticAIPlugin()])
 
     interceptors = []
@@ -145,11 +153,26 @@ async def main() -> None:
             logger.info("Shutting down")
 
 
+def _signal_handler(sig: int, _frame: object) -> None:
+    """Handle shutdown signals gracefully.
+
+    This mirrors the executor Temporal worker so the DSL worker can shut down
+    cleanly on SIGINT/SIGTERM (e.g. `docker stop`, Kubernetes termination).
+    """
+    logger.info("Received shutdown signal", signal=sig)
+    interrupt_event.set()
+
+
 if __name__ == "__main__":
+    # Install signal handlers before starting the event loop.
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
     loop = asyncio.new_event_loop()
     loop.set_task_factory(asyncio.eager_task_factory)
     try:
         loop.run_until_complete(main())
     except KeyboardInterrupt:
         interrupt_event.set()
+    finally:
         loop.run_until_complete(loop.shutdown_asyncgens())

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from ipaddress import ip_address, ip_network
-from typing import Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 import orjson
 from fastapi import Depends, Header, HTTPException, Request, status
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import NoResultFound
 
@@ -20,9 +22,14 @@ from tracecat.dsl.schemas import TriggerInputs
 from tracecat.ee.interactions.connectors import parse_slack_interaction_input
 from tracecat.ee.interactions.enums import InteractionCategory
 from tracecat.ee.interactions.schemas import InteractionInput
+from tracecat.exceptions import TracecatValidationError
 from tracecat.identifiers.workflow import AnyWorkflowIDPath
 from tracecat.logger import logger
 from tracecat.webhooks.schemas import NDJSON_CONTENT_TYPES
+from tracecat.workflow.management.management import WorkflowsManagementService
+
+if TYPE_CHECKING:
+    from tracecat.dsl.common import DSLInput
 
 API_KEY_HEADER = "x-tracecat-api-key"
 
@@ -308,3 +315,51 @@ ValidWorkflowDefinitionDep = Annotated[
     WorkflowDefinition, Depends(validate_workflow_definition)
 ]
 """Returns WorkflowDefinition that is not loaded with the `workflow` relationship"""
+
+
+@dataclass
+class DraftWorkflowContext:
+    """Context for draft workflow execution containing DSL and registry lock."""
+
+    dsl: DSLInput
+    registry_lock: dict[str, str] | None
+
+
+async def validate_draft_workflow(
+    workflow_id: AnyWorkflowIDPath,
+) -> DraftWorkflowContext:
+    """Build DSL from the draft workflow (i.e. definition in the workflow table)."""
+
+    role = ctx_role.get()
+    async with WorkflowsManagementService.with_session(role=role) as mgmt_service:
+        workflow = await mgmt_service.get_workflow(workflow_id)
+        if not workflow:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workflow not found",
+            )
+        try:
+            dsl: DSLInput = await mgmt_service.build_dsl_from_workflow(workflow)
+            return DraftWorkflowContext(dsl=dsl, registry_lock=workflow.registry_lock)
+        except TracecatValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "type": "TracecatValidationError",
+                    "message": str(e),
+                    "detail": e.detail,
+                },
+            ) from e
+        except ValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "type": "ValidationError",
+                    "message": str(e),
+                    "detail": e.errors(),
+                },
+            ) from e
+
+
+DraftWorkflowDep = Annotated[DraftWorkflowContext, Depends(validate_draft_workflow)]
+"""Returns DraftWorkflowContext with DSL and registry_lock from the draft workflow"""

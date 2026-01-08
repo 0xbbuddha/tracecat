@@ -1,5 +1,4 @@
 import asyncio
-import traceback
 import uuid
 from pathlib import Path
 from typing import Any
@@ -12,14 +11,12 @@ from tracecat.auth.types import Role
 from tracecat.dsl.common import create_default_execution_context
 from tracecat.dsl.schemas import ActionStatement, RunActionInput, RunContext
 from tracecat.exceptions import ExecutionError, LoopExecutionError
-from tracecat.executor.schemas import ExecutorActionErrorInfo
+from tracecat.executor.backends.direct import DirectBackend
+from tracecat.executor.schemas import ActionImplementation, ExecutorActionErrorInfo
 from tracecat.executor.service import (
-    _dispatch_action,
+    dispatch_action,
     flatten_wrapped_exc_error_group,
-    run_action_from_input,
-    sync_executor_entrypoint,
 )
-from tracecat.expressions.common import ExprContext
 from tracecat.expressions.expectations import ExpectedField
 from tracecat.identifiers.workflow import WorkflowUUID
 from tracecat.integrations.enums import OAuthGrantType
@@ -36,6 +33,19 @@ from tracecat.registry.actions.service import RegistryActionsService
 from tracecat.registry.repository import Repository
 from tracecat.secrets.schemas import SecretCreate, SecretKeyValue
 from tracecat.secrets.service import SecretsService
+
+
+async def run_action_test(input: RunActionInput, role: Role) -> Any:
+    """Test helper: execute action using production code path.
+
+    Uses dispatch_action to ensure proper service-layer orchestration
+    for both UDF and template actions.
+    """
+    from tracecat.contexts import ctx_role
+
+    ctx_role.set(role)
+    backend = DirectBackend()
+    return await dispatch_action(backend, input)
 
 
 @pytest.fixture
@@ -137,7 +147,7 @@ async def test_executor_can_run_udf_with_secrets(
         )
 
         # Act
-        result = await run_action_from_input(input, test_role)
+        result = await run_action_test(input, test_role)
 
         # Assert
         assert result == "__SECRET_VALUE_UDF__"
@@ -241,7 +251,7 @@ async def test_executor_can_run_template_action_with_secret(
         )
 
         # Act
-        result = await run_action_from_input(input, test_role)
+        result = await run_action_test(input, test_role)
 
         # Assert
         assert result == "__SECRET_VALUE__"
@@ -344,7 +354,7 @@ async def test_executor_can_run_template_action_with_oauth(
     )
 
     # Act
-    result = await run_action_from_input(input, test_role)
+    result = await run_action_test(input, test_role)
 
     # Assert - the template returns the result from the reshape step
     # which contains oauth_token
@@ -423,7 +433,7 @@ async def test_executor_can_run_udf_with_oauth(
     )
 
     # Act
-    result = await run_action_from_input(input, test_role)
+    result = await run_action_test(input, test_role)
 
     # Assert - the UDF returns the OAuth token value
     assert result == oauth_token_value, (
@@ -473,7 +483,7 @@ async def test_executor_can_run_udf_with_oauth_in_secret_expression(
     )
 
     # Act
-    result = await run_action_from_input(input, test_role)
+    result = await run_action_test(input, test_role)
 
     # Assert - the UDF returns the OAuth token value
     assert result == oauth_token_value, (
@@ -481,22 +491,43 @@ async def test_executor_can_run_udf_with_oauth_in_secret_expression(
     )
 
 
-async def mock_action(input: Any, **kwargs):
+async def mock_action(input: Any, role: Any = None):
     """Mock action that simulates some async work"""
+    del role  # unused
     await asyncio.sleep(0.1)
     return input
 
 
 @pytest.mark.integration
-def test_sync_executor_entrypoint(
+@pytest.mark.anyio
+async def test_direct_backend_execute(
     test_role: Role, mock_run_context: RunContext, monkeypatch: pytest.MonkeyPatch
 ):
-    """Test that the sync executor entrypoint properly handles async operations."""
+    """Test that the direct backend properly handles async operations."""
+    from tracecat.executor.backends.direct import DirectBackend
+    from tracecat.executor.schemas import ExecutorResultSuccess, ResolvedContext
 
-    # Mock the run_action_from_input function
-    monkeypatch.setattr("tracecat.executor.service.run_action_from_input", mock_action)
+    # Mock _execute_with_context to return a simple result
+    async def mock_execute_with_context(self, input, role, resolved_context):
+        return {"input": input.task.args}
 
-    # Run the entrypoint
+    monkeypatch.setattr(
+        DirectBackend, "_execute_with_context", mock_execute_with_context
+    )
+
+    backend = DirectBackend()
+    resolved_context = ResolvedContext(
+        secrets={},
+        variables={},
+        action_impl=ActionImplementation(type="udf", module="test", name="mock"),
+        evaluated_args={},
+        workspace_id="test-workspace",
+        workflow_id="test-workflow",
+        run_id="test-run",
+        executor_token="",
+    )
+
+    # Run the backend execute
     for i in range(10):
         input = RunActionInput(
             task=ActionStatement(
@@ -509,22 +540,39 @@ def test_sync_executor_entrypoint(
             exec_context=create_default_execution_context(),
             run_context=mock_run_context,
         )
-        result = sync_executor_entrypoint(input, test_role)
-        assert result == input.model_dump(mode="json")
+        result = await backend.execute(input, test_role, resolved_context)
+        assert isinstance(result, ExecutorResultSuccess)
+        assert result.result == {"input": {"value": i}}
 
 
 async def mock_error(*args, **kwargs):
-    """Mock run_action_from_input to raise an error"""
+    """Mock _execute_with_context to raise an error"""
     raise ValueError("__EXPECTED_MESSAGE__")
 
 
 @pytest.mark.integration
-def test_sync_executor_entrypoint_returns_wrapped_error(
+@pytest.mark.anyio
+async def test_direct_backend_returns_wrapped_error(
     test_role: Role, mock_run_context: RunContext, monkeypatch: pytest.MonkeyPatch
 ):
-    """Test that the sync executor entrypoint properly handles wrapped errors."""
+    """Test that the direct backend properly handles wrapped errors."""
+    from tracecat.executor.backends.direct import DirectBackend
+    from tracecat.executor.schemas import ExecutorResultFailure, ResolvedContext
+
     # Create a test input with an action that will raise an error
-    monkeypatch.setattr("tracecat.executor.service.run_action_from_input", mock_error)
+    monkeypatch.setattr(DirectBackend, "_execute_with_context", mock_error)
+
+    backend = DirectBackend()
+    resolved_context = ResolvedContext(
+        secrets={},
+        variables={},
+        action_impl=ActionImplementation(type="udf", module="test", name="error"),
+        evaluated_args={},
+        workspace_id="test-workspace",
+        workflow_id="test-workflow",
+        run_id="test-run",
+        executor_token="",
+    )
 
     input = RunActionInput(
         task=ActionStatement(
@@ -538,14 +586,15 @@ def test_sync_executor_entrypoint_returns_wrapped_error(
         run_context=mock_run_context,
     )
 
-    # Run the entrypoint and verify it returns a RegistryActionErrorInfo
-    result = sync_executor_entrypoint(input, test_role)
-    assert isinstance(result, ExecutorActionErrorInfo)
-    assert result.type == "ValueError"
-    assert result.message == "__EXPECTED_MESSAGE__"
-    assert result.action_name == "test.error_action"
-    assert result.filename == __file__
-    assert result.function == "mock_error"
+    # Run the backend execute and verify it returns a failure result
+    result = await backend.execute(input, test_role, resolved_context)
+    assert isinstance(result, ExecutorResultFailure)
+    error_info = result.error
+    assert error_info.type == "ValueError"
+    assert error_info.message == "__EXPECTED_MESSAGE__"
+    assert error_info.action_name == "test.error_action"
+    assert error_info.filename == __file__
+    assert error_info.function == "mock_error"
 
 
 @pytest.mark.anyio
@@ -554,39 +603,18 @@ async def test_dispatcher(
     test_role,
     mock_run_context,
     db_session_with_repo,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    """Try to replicate `Error in loop`ty error, where usually we fail validation inside the executor loop.
+    """Try to replicate `Error in loop` error, where usually we fail validation inside the executor loop.
 
     We will execute everything in the current thread.
     1. Add mock package with a function that will raise an error
     """
+    from tracecat.contexts import ctx_role
+    from tracecat.executor.backends.direct import DirectBackend
 
-    # Mock out run_action_on_ray_cluster
-    async def mocked_executor_entrypoint(
-        input: RunActionInput, role: Role, *args, **kwargs
-    ):
-        try:
-            return await run_action_from_input(input=input, role=role)
-        except Exception as e:
-            # Raise the error proxy here
-            logger.error(
-                "Error running action, raising error proxy",
-                error=e,
-                type=type(e).__name__,
-                traceback=traceback.format_exc(),
-            )
-            iteration = kwargs.get("iteration", None)
-            exec_result = ExecutorActionErrorInfo.from_exc(e, input.task.action)
-            if iteration is not None:
-                exec_result.loop_iteration = iteration
-                exec_result.loop_vars = input.exec_context[ExprContext.LOCAL_VARS]
-            raise ExecutionError(info=exec_result) from None
+    # Set up the role context for dispatch_action
+    ctx_role.set(test_role)
 
-    monkeypatch.setattr(
-        "tracecat.executor.service.run_action_on_ray_cluster",
-        mocked_executor_entrypoint,
-    )
     session, db_repo_id = db_session_with_repo
     repo = Repository()
     repo._register_udfs_from_package(mock_package)
@@ -616,8 +644,8 @@ async def test_dispatcher(
     )
 
     # Act
-
-    result = await _dispatch_action(input, test_role)
+    backend = DirectBackend()
+    result = await dispatch_action(backend, input)
 
     # This should run correctly
     assert result == [101, 102, 103, 104, 105]
@@ -639,7 +667,7 @@ async def test_dispatcher(
 
     # Act
     with pytest.raises(LoopExecutionError) as e:
-        result = await _dispatch_action(input, test_role)
+        result = await dispatch_action(backend, input)
     assert len(e.value.loop_errors) == 1
     assert e.value.loop_errors[0].info.loop_iteration == 2
     assert e.value.loop_errors[0].info.loop_vars == {"x": None}
@@ -660,7 +688,7 @@ async def test_dispatcher(
 
     # Act
     with pytest.raises(LoopExecutionError) as e:
-        result = await _dispatch_action(input, test_role)
+        result = await dispatch_action(backend, input)
     assert len(e.value.loop_errors) == 1
     assert e.value.loop_errors[0].info.loop_iteration == 1
     assert e.value.loop_errors[0].info.loop_vars == {"x": None}

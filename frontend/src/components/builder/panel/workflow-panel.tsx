@@ -2,19 +2,11 @@
 
 import { zodResolver } from "@hookform/resolvers/zod"
 import type React from "react"
-import { useCallback, useMemo } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import "@radix-ui/react-dialog"
 
-import {
-  FileSliders,
-  Info,
-  LayoutListIcon,
-  Redo2Icon,
-  Settings2Icon,
-  ShapesIcon,
-  Undo2Icon,
-} from "lucide-react"
+import { FileTextIcon, Info, LayoutListIcon } from "lucide-react"
 import { useForm } from "react-hook-form"
 import { z } from "zod"
 import {
@@ -26,12 +18,7 @@ import {
 } from "@/client"
 import { ControlledYamlField } from "@/components/builder/panel/action-panel-fields"
 import { CopyButton } from "@/components/copy-button"
-import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
-} from "@/components/ui/accordion"
+import { SimpleEditor } from "@/components/tiptap-templates/simple/simple-editor"
 import {
   Form,
   FormControl,
@@ -48,7 +35,6 @@ import {
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Textarea } from "@/components/ui/textarea"
 import {
   isRequestValidationErrorArray,
   type TracecatApiError,
@@ -60,12 +46,9 @@ const createWorkflowUpdateFormSchema = (workspaceId: string) =>
     .object({
       title: z
         .string()
-        .min(1, { message: "Name is required" })
+        .trim()
+        .min(3, { message: "Name must be at least 3 characters" })
         .max(100, { message: "Name cannot exceed 100 characters" }),
-      description: z
-        .string()
-        .max(1000, { message: "Description cannot exceed 1000 characters" })
-        .optional(),
       alias: z
         .string()
         .max(100, { message: "Alias cannot exceed 100 characters" })
@@ -146,7 +129,63 @@ type WorkflowUpdateFormSchema = ReturnType<
   typeof createWorkflowUpdateFormSchema
 >
 type WorkflowUpdateForm = z.infer<WorkflowUpdateFormSchema>
+
+const workflowReadmeSchema = z
+  .string()
+  .max(1000, { message: "README cannot exceed 1000 characters" })
+
+type WorkflowPanelTab = "workflow" | "readme"
+
 export function WorkflowPanel({
+  workflow,
+}: {
+  workflow: WorkflowRead
+}): React.JSX.Element {
+  const [activeTab, setActiveTab] = useState<WorkflowPanelTab>("workflow")
+
+  return (
+    <div className="flex h-full flex-col overflow-hidden">
+      <Tabs
+        defaultValue="workflow"
+        value={activeTab}
+        onValueChange={(value) => setActiveTab(value as WorkflowPanelTab)}
+        className="flex h-full w-full flex-col"
+      >
+        <div className="w-full min-w-[30rem] shrink-0">
+          <div className="flex items-center justify-start">
+            <TabsList className="h-9 justify-start rounded-none bg-transparent p-0">
+              <TabsTrigger
+                className="flex h-full min-w-24 items-center justify-center rounded-none px-5 py text-xs data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+                value="workflow"
+              >
+                <LayoutListIcon className="mr-2 size-4" />
+                <span>Workflow</span>
+              </TabsTrigger>
+              <TabsTrigger
+                className="flex h-full min-w-24 items-center justify-center rounded-none px-5 text-xs data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+                value="readme"
+              >
+                <FileTextIcon className="mr-2 size-4" />
+                <span>README</span>
+              </TabsTrigger>
+            </TabsList>
+          </div>
+          <Separator />
+        </div>
+        <div className="flex-1 overflow-auto">
+          <TabsContent value="workflow" className="mt-0 h-full">
+            <WorkflowSettingsPanel workflow={workflow} />
+          </TabsContent>
+          <TabsContent value="readme" className="mt-0 h-full">
+            <WorkflowReadmePanel workflow={workflow} />
+          </TabsContent>
+        </div>
+      </Tabs>
+    </div>
+  )
+}
+
+function WorkflowSettingsPanel({
   workflow,
 }: {
   workflow: WorkflowRead
@@ -161,12 +200,15 @@ export function WorkflowPanel({
       mode: "async",
     }),
     defaultValues: {
-      title: workflow.title || "",
-      description: workflow.description || "",
+      title: workflow.title,
       alias: workflow.alias,
       environment: workflow.config?.environment || "default",
       timeout: workflow.config?.timeout || 0,
-      expects: workflow.expects || undefined,
+      // Use undefined for empty objects so the YAML editor shows empty instead of {}
+      expects:
+        workflow.expects && Object.keys(workflow.expects).length > 0
+          ? workflow.expects
+          : undefined,
       returns: workflow.returns,
       error_handler: workflow.error_handler || "",
     },
@@ -238,429 +280,403 @@ export function WorkflowPanel({
   }, [methods, onSubmit, workflowUpdateFormSchema])
 
   return (
-    <div onBlur={onPanelBlur} className="pb-16">
-      <Tabs defaultValue="workflow-settings" className="w-full">
-        <Form {...methods}>
-          <form
-            onSubmit={methods.handleSubmit(onSubmit)}
-            className="flex flex-col overflow-auto"
-          >
-            <div className="w-full min-w-[30rem]">
-              <div className="mt-0.5 flex items-center justify-start">
-                <TabsList className="h-8 justify-start rounded-none bg-transparent p-0">
-                  <TabsTrigger
-                    className="flex h-full min-w-28 items-center justify-center rounded-none py-0 text-xs data-[state=active]:bg-transparent data-[state=active]:shadow-none"
-                    value="workflow-settings"
-                  >
-                    <LayoutListIcon className="mr-2 size-4" />
-                    <span>General</span>
-                  </TabsTrigger>
-                  <TabsTrigger
-                    className="h-full min-w-28 rounded-none py-0 text-xs data-[state=active]:bg-transparent data-[state=active]:shadow-none"
-                    value="workflow-schema"
-                  >
-                    <ShapesIcon className="mr-2 size-4" />
-                    <span>Schema</span>
-                  </TabsTrigger>
-                </TabsList>
-              </div>
-              <Separator />
-              <div className="w-full overflow-x-auto pb-32">
-                <TabsContent value="workflow-settings" className="pb-8">
-                  <Accordion
-                    type="multiple"
-                    defaultValue={["workflow-settings", "workflow-config"]}
-                  >
-                    <AccordionItem value="workflow-settings">
-                      <AccordionTrigger className="px-4 text-xs font-bold">
-                        <div className="flex items-center">
-                          <Settings2Icon className="mr-3 size-4" />
-                          <span>Workflow</span>
+    <div onBlur={onPanelBlur} className="flex h-full flex-col">
+      <Form {...methods}>
+        <form
+          onSubmit={methods.handleSubmit(onSubmit)}
+          className="flex flex-1 flex-col overflow-auto"
+        >
+          {/* All other fields in one flat section */}
+          <div className="flex flex-col gap-6 overflow-y-auto px-4 pb-32 pt-4">
+            {/* Name */}
+            <FormField
+              control={methods.control}
+              name="title"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel className="flex items-center text-xs">
+                    <HoverCard openDelay={100} closeDelay={100}>
+                      <HoverCardTrigger asChild className="hover:border-none">
+                        <Info className="mr-1 size-3 stroke-muted-foreground" />
+                      </HoverCardTrigger>
+                      <HoverCardContent
+                        className="w-[300px] p-3 font-mono text-xs tracking-tight"
+                        side="left"
+                        sideOffset={20}
+                      >
+                        <div className="w-full space-y-4">
+                          <div className="flex w-full items-center justify-between text-muted-foreground">
+                            <span className="font-mono text-sm font-semibold">
+                              Workflow name
+                            </span>
+                          </div>
+                          <span className="text-muted-foreground">
+                            A human-readable name for the workflow. Must be at
+                            least 3 characters and less than 100 characters.
+                          </span>
                         </div>
-                      </AccordionTrigger>
-                      <AccordionContent>
-                        <div className="my-4 space-y-2 px-4">
-                          <FormField
-                            control={methods.control}
-                            name="title"
-                            render={({ field }) => (
-                              <FormItem>
-                                <FormLabel className="text-xs">Name</FormLabel>
-                                <FormControl>
-                                  <Input
-                                    className="text-xs"
-                                    placeholder="Name your workflow..."
-                                    {...field}
-                                  />
-                                </FormControl>
-                                <FormMessage />
-                              </FormItem>
-                            )}
-                          />
-                          <FormField
-                            control={methods.control}
-                            name="description"
-                            render={({ field }) => (
-                              <FormItem>
-                                <FormLabel className="text-xs">
-                                  Description
-                                </FormLabel>
-                                <FormControl>
-                                  <Textarea
-                                    className="text-xs"
-                                    placeholder="Describe your workflow..."
-                                    {...field}
-                                  />
-                                </FormControl>
-                                <FormMessage />
-                              </FormItem>
-                            )}
-                          />
-                          <FormField
-                            control={methods.control}
-                            name="error_handler"
-                            render={({ field }) => (
-                              <FormItem>
-                                <div className="flex items-center gap-2">
-                                  <FormLabel className="flex items-center text-xs">
-                                    <HoverCard openDelay={100} closeDelay={100}>
-                                      <HoverCardTrigger
-                                        asChild
-                                        className="hover:border-none"
-                                      >
-                                        <Info className="mr-1 size-3 stroke-muted-foreground" />
-                                      </HoverCardTrigger>
-                                      <HoverCardContent
-                                        className="w-[300px] p-3 font-mono text-xs tracking-tight"
-                                        side="right"
-                                        sideOffset={20}
-                                      >
-                                        <div className="w-full space-y-4">
-                                          <div className="flex w-full items-center justify-between text-muted-foreground">
-                                            <span className="font-mono text-sm font-semibold">
-                                              Error handler workflow
-                                            </span>
-                                            <span className="text-xs text-muted-foreground/80">
-                                              (optional)
-                                            </span>
-                                          </div>
-                                          <span className="text-muted-foreground">
-                                            The ID or alias of another workflow
-                                            to run when this workflow encounters
-                                            an error.
-                                          </span>
-                                        </div>
-                                      </HoverCardContent>
-                                    </HoverCard>
-                                    <span>Error workflow</span>
-                                  </FormLabel>
-                                  {field.value && (
-                                    <CopyButton
-                                      value={field.value}
-                                      toastMessage="Copied error workflow to clipboard"
-                                    />
-                                  )}
-                                </div>
-                                <FormControl>
-                                  <Input
-                                    className="text-xs"
-                                    placeholder="Workflow to run when an error occurs."
-                                    {...field}
-                                    value={field.value || ""}
-                                    onChange={field.onChange}
-                                  />
-                                </FormControl>
-                                <FormMessage />
-                              </FormItem>
-                            )}
-                          />
-                          <FormField
-                            control={methods.control}
-                            name="alias"
-                            render={({ field }) => (
-                              <FormItem>
-                                <div className="flex items-center gap-2">
-                                  <FormLabel className="flex items-center text-xs">
-                                    <HoverCard openDelay={100} closeDelay={100}>
-                                      <HoverCardTrigger
-                                        asChild
-                                        className="hover:border-none"
-                                      >
-                                        <Info className="mr-1 size-3 stroke-muted-foreground" />
-                                      </HoverCardTrigger>
-                                      <HoverCardContent
-                                        className="w-[300px] p-3 font-mono text-xs tracking-tight"
-                                        side="right"
-                                        sideOffset={20}
-                                      >
-                                        <div className="w-full space-y-4">
-                                          <div className="flex w-full items-center justify-between text-muted-foreground">
-                                            <span className="font-mono text-sm font-semibold">
-                                              Workflow alias
-                                            </span>
-                                            <span className="text-xs text-muted-foreground/80">
-                                              (optional)
-                                            </span>
-                                          </div>
-                                          <span className="text-muted-foreground">
-                                            A unique identifier for the workflow
-                                            that can be used instead of the
-                                            workflow ID. Must be unique within
-                                            your workspace.
-                                          </span>
-                                        </div>
-                                      </HoverCardContent>
-                                    </HoverCard>
-                                    <span>Alias</span>
-                                  </FormLabel>
-                                  {field.value && (
-                                    <CopyButton
-                                      value={field.value}
-                                      toastMessage="Copied workflow alias to clipboard"
-                                    />
-                                  )}
-                                </div>
-                                <FormControl>
-                                  <Input
-                                    className="text-xs"
-                                    placeholder="Unique identifier for this workflow."
-                                    {...field}
-                                    value={field.value || ""}
-                                    onChange={field.onChange}
-                                  />
-                                </FormControl>
-                                <FormMessage />
-                              </FormItem>
-                            )}
-                          />
-                          <div className="space-y-2">
-                            <FormLabel className="flex items-center gap-2 text-xs">
-                              <span>Workflow ID</span>
-                              <CopyButton
-                                value={workflow.id}
-                                toastMessage="Copied workflow ID to clipboard"
-                              />
-                            </FormLabel>
-                            <div className="rounded-md border shadow-sm">
-                              <Input
-                                defaultValue={workflow.id}
-                                className="rounded-md border-none text-xs shadow-none"
-                                readOnly
-                                disabled
-                              />
+                      </HoverCardContent>
+                    </HoverCard>
+                    <span>Name</span>
+                  </FormLabel>
+                  <FormControl>
+                    <Input
+                      className="text-xs"
+                      placeholder="Name your workflow..."
+                      {...field}
+                      value={field.value || ""}
+                      onChange={field.onChange}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            {/* Alias */}
+            <FormField
+              control={methods.control}
+              name="alias"
+              render={({ field }) => (
+                <FormItem>
+                  <div className="flex items-center gap-2">
+                    <FormLabel className="flex items-center text-xs">
+                      <HoverCard openDelay={100} closeDelay={100}>
+                        <HoverCardTrigger asChild className="hover:border-none">
+                          <Info className="mr-1 size-3 stroke-muted-foreground" />
+                        </HoverCardTrigger>
+                        <HoverCardContent
+                          className="w-[300px] p-3 font-mono text-xs tracking-tight"
+                          side="left"
+                          sideOffset={20}
+                        >
+                          <div className="w-full space-y-4">
+                            <div className="flex w-full items-center justify-between text-muted-foreground">
+                              <span className="font-mono text-sm font-semibold">
+                                Workflow alias
+                              </span>
+                              <span className="text-xs text-muted-foreground/80">
+                                (optional)
+                              </span>
                             </div>
-                          </div>
-                        </div>
-                      </AccordionContent>
-                    </AccordionItem>
-                    <AccordionItem value="workflow-config">
-                      <AccordionTrigger className="px-4 text-xs font-bold">
-                        <div className="flex items-center">
-                          <FileSliders className="mr-3 size-4" />
-                          <span>Configuration</span>
-                        </div>
-                      </AccordionTrigger>
-                      <AccordionContent>
-                        <div className="flex flex-col space-y-4 px-4">
-                          <div className="flex items-center">
-                            <HoverCard openDelay={100} closeDelay={100}>
-                              <HoverCardTrigger
-                                asChild
-                                className="hover:border-none"
-                              >
-                                <Info className="mr-1 size-3 stroke-muted-foreground" />
-                              </HoverCardTrigger>
-                              {/* Config tooltip */}
-                              <HoverCardContent
-                                className="w-[300px] p-3 font-mono text-xs tracking-tight"
-                                side="left"
-                                sideOffset={20}
-                              >
-                                <div className="w-full space-y-4">
-                                  <div className="flex w-full items-center justify-between text-muted-foreground ">
-                                    <span className="font-mono text-sm font-semibold">
-                                      Runtime configuration
-                                    </span>
-                                    <span className="text-xs text-muted-foreground/80">
-                                      (optional)
-                                    </span>
-                                  </div>
-                                  <div className="flex w-full flex-col items-center justify-between space-y-4 text-muted-foreground">
-                                    <span>
-                                      Configuration that modifies the runtime
-                                      behavior of services.
-                                    </span>
-                                  </div>
-                                  {/* Schema is hardcoded here for now */}
-                                  <div className="space-y-2">
-                                    <span className="w-full font-semibold text-muted-foreground">
-                                      Fields
-                                    </span>
-                                    <pre className="space-y-2 text-wrap rounded-md border bg-muted-foreground/10 p-2 text-xs text-foreground/70">
-                                      <div>
-                                        <b>environment</b>
-                                        {": string | null"}
-                                        <p className="text-muted-foreground">
-                                          # The workflow&apos;s target execution
-                                          environment. Defaults to null.
-                                        </p>
-                                      </div>
-                                      <div>
-                                        <b>timeout</b>
-                                        {": float"}
-                                        <p className="text-muted-foreground">
-                                          # The maximum number of seconds to
-                                          wait for the workflow to complete. If
-                                          set to 0, the workflow will not
-                                          timeout. Defaults to 0 (unlimited).
-                                        </p>
-                                      </div>
-                                    </pre>
-                                  </div>
-                                </div>
-                              </HoverCardContent>
-                            </HoverCard>
-                            <span className="text-xs text-muted-foreground">
-                              Define the runtime configuration for the workflow.
+                            <span className="text-muted-foreground">
+                              A unique identifier for the workflow that can be
+                              used instead of the workflow ID. Must be unique
+                              within your workspace.
                             </span>
                           </div>
-                          <FormField
-                            name="environment"
-                            control={methods.control}
-                            render={({ field }) => (
-                              <FormItem>
-                                <FormLabel className="text-xs">
-                                  Environment
-                                </FormLabel>
-                                <FormControl>
-                                  <Input
-                                    className="text-xs"
-                                    placeholder="default"
-                                    {...field}
-                                  />
-                                </FormControl>
-                                <FormMessage />
-                              </FormItem>
-                            )}
-                          />
-                          <FormField
-                            name="timeout"
-                            control={methods.control}
-                            render={({ field }) => (
-                              <FormItem>
-                                <FormLabel className="text-xs">
-                                  Timeout (seconds)
-                                </FormLabel>
-                                <FormControl>
-                                  <Input
-                                    type="number"
-                                    className="text-xs"
-                                    placeholder="0 (unlimited)"
-                                    value={field.value || ""}
-                                    onChange={(e) =>
-                                      field.onChange(
-                                        e.target.value
-                                          ? parseInt(e.target.value)
-                                          : undefined
-                                      )
-                                    }
-                                  />
-                                </FormControl>
-                                <FormMessage />
-                              </FormItem>
-                            )}
-                          />
+                        </HoverCardContent>
+                      </HoverCard>
+                      <span>Alias</span>
+                    </FormLabel>
+                    {field.value && (
+                      <CopyButton
+                        value={field.value}
+                        toastMessage="Copied workflow alias to clipboard"
+                      />
+                    )}
+                  </div>
+                  <FormControl>
+                    <Input
+                      className="text-xs"
+                      placeholder="Unique identifier for this workflow"
+                      {...field}
+                      value={field.value || ""}
+                      onChange={field.onChange}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            {/* Error handler */}
+            <FormField
+              control={methods.control}
+              name="error_handler"
+              render={({ field }) => (
+                <FormItem>
+                  <div className="flex items-center gap-2">
+                    <FormLabel className="flex items-center text-xs">
+                      <HoverCard openDelay={100} closeDelay={100}>
+                        <HoverCardTrigger asChild className="hover:border-none">
+                          <Info className="mr-1 size-3 stroke-muted-foreground" />
+                        </HoverCardTrigger>
+                        <HoverCardContent
+                          className="w-[300px] p-3 font-mono text-xs tracking-tight"
+                          side="left"
+                          sideOffset={20}
+                        >
+                          <div className="w-full space-y-4">
+                            <div className="flex w-full items-center justify-between text-muted-foreground">
+                              <span className="font-mono text-sm font-semibold">
+                                Error handler workflow
+                              </span>
+                              <span className="text-xs text-muted-foreground/80">
+                                (optional)
+                              </span>
+                            </div>
+                            <span className="text-muted-foreground">
+                              The ID or alias of another workflow to run when
+                              this workflow encounters an error.
+                            </span>
+                          </div>
+                        </HoverCardContent>
+                      </HoverCard>
+                      <span>Error workflow</span>
+                    </FormLabel>
+                    {field.value && (
+                      <CopyButton
+                        value={field.value}
+                        toastMessage="Copied error workflow to clipboard"
+                      />
+                    )}
+                  </div>
+                  <FormControl>
+                    <Input
+                      className="text-xs"
+                      placeholder="Workflow to run when an error occurs."
+                      {...field}
+                      value={field.value || ""}
+                      onChange={field.onChange}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            {/* Environment */}
+            <FormField
+              name="environment"
+              control={methods.control}
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel className="flex items-center text-xs">
+                    <HoverCard openDelay={100} closeDelay={100}>
+                      <HoverCardTrigger asChild className="hover:border-none">
+                        <Info className="mr-1 size-3 stroke-muted-foreground" />
+                      </HoverCardTrigger>
+                      <HoverCardContent
+                        className="w-[300px] p-3 font-mono text-xs tracking-tight"
+                        side="left"
+                        sideOffset={20}
+                      >
+                        <div className="w-full space-y-4">
+                          <div className="flex w-full items-center justify-between text-muted-foreground">
+                            <span className="font-mono text-sm font-semibold">
+                              Environment
+                            </span>
+                            <span className="text-xs text-muted-foreground/80">
+                              (optional)
+                            </span>
+                          </div>
+                          <span className="text-muted-foreground">
+                            The workflow&apos;s target execution environment.
+                            Defaults to &quot;default&quot;.
+                          </span>
                         </div>
-                      </AccordionContent>
-                    </AccordionItem>
-                  </Accordion>
-                </TabsContent>
-                <TabsContent value="workflow-schema" className="pb-8">
-                  <Accordion
-                    type="multiple"
-                    defaultValue={["workflow-expects", "workflow-returns"]}
+                      </HoverCardContent>
+                    </HoverCard>
+                    <span>Environment</span>
+                  </FormLabel>
+                  <FormControl>
+                    <Input
+                      className="text-xs"
+                      placeholder="default"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            {/* Timeout */}
+            <FormField
+              name="timeout"
+              control={methods.control}
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel className="flex items-center text-xs">
+                    <HoverCard openDelay={100} closeDelay={100}>
+                      <HoverCardTrigger asChild className="hover:border-none">
+                        <Info className="mr-1 size-3 stroke-muted-foreground" />
+                      </HoverCardTrigger>
+                      <HoverCardContent
+                        className="w-[300px] p-3 font-mono text-xs tracking-tight"
+                        side="left"
+                        sideOffset={20}
+                      >
+                        <div className="w-full space-y-4">
+                          <div className="flex w-full items-center justify-between text-muted-foreground">
+                            <span className="font-mono text-sm font-semibold">
+                              Timeout
+                            </span>
+                            <span className="text-xs text-muted-foreground/80">
+                              (optional)
+                            </span>
+                          </div>
+                          <span className="text-muted-foreground">
+                            The maximum number of seconds to wait for the
+                            workflow to complete. If set to 0, the workflow will
+                            not timeout. Defaults to 0 (unlimited).
+                          </span>
+                        </div>
+                      </HoverCardContent>
+                    </HoverCard>
+                    <span>Timeout (seconds)</span>
+                  </FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      className="text-xs"
+                      placeholder="0 (unlimited)"
+                      value={field.value || ""}
+                      onChange={(e) =>
+                        field.onChange(
+                          e.target.value ? parseInt(e.target.value) : undefined
+                        )
+                      }
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            {/* Input schema */}
+            <FormItem>
+              <FormLabel className="flex items-center text-xs">
+                <HoverCard openDelay={100} closeDelay={100}>
+                  <HoverCardTrigger asChild className="hover:border-none">
+                    <Info className="mr-1 size-3 stroke-muted-foreground" />
+                  </HoverCardTrigger>
+                  <HoverCardContent
+                    className="w-[300px] p-3 font-mono text-xs tracking-tight"
+                    side="left"
+                    sideOffset={20}
                   >
-                    <AccordionItem value="workflow-expects">
-                      <AccordionTrigger className="px-4 text-xs font-bold">
-                        <div className="flex items-center">
-                          <Redo2Icon className="mr-3 size-4" />
-                          <span>Input schema</span>
-                        </div>
-                      </AccordionTrigger>
-                      <AccordionContent>
-                        <div className="flex flex-col space-y-4 px-4">
-                          <div className="flex items-center">
-                            <HoverCard openDelay={100} closeDelay={100}>
-                              <HoverCardTrigger
-                                asChild
-                                className="hover:border-none"
-                              >
-                                <Info className="mr-1 size-3 stroke-muted-foreground" />
-                              </HoverCardTrigger>
-                              <HoverCardContent
-                                className="w-[300px] p-3 font-mono text-xs tracking-tight"
-                                side="left"
-                                sideOffset={20}
-                              >
-                                <WorkflowInputSchemaTooltip />
-                              </HoverCardContent>
-                            </HoverCard>
-                            <span className="text-xs text-muted-foreground">
-                              Define the schema for the workflow trigger inputs.
-                            </span>
-                          </div>
-                          <span className="text-xs text-muted-foreground">
-                            If undefined, the workflow will not validate the
-                            trigger inputs.
-                          </span>
-                          <ControlledYamlField fieldName="expects" />
-                        </div>
-                      </AccordionContent>
-                    </AccordionItem>
-                    <AccordionItem value="workflow-returns">
-                      <AccordionTrigger className="px-4 text-xs font-bold">
-                        <div className="flex items-center">
-                          <Undo2Icon className="mr-3 size-4" />
-                          <span>Output schema</span>
-                        </div>
-                      </AccordionTrigger>
-                      <AccordionContent>
-                        <div className="flex flex-col space-y-4 px-4">
-                          <div className="flex items-center">
-                            <HoverCard openDelay={100} closeDelay={100}>
-                              <HoverCardTrigger
-                                asChild
-                                className="hover:border-none"
-                              >
-                                <Info className="mr-1 size-3 stroke-muted-foreground" />
-                              </HoverCardTrigger>
-                              <HoverCardContent
-                                className="w-[300px] p-3 font-mono text-xs tracking-tight"
-                                side="left"
-                                sideOffset={20}
-                              >
-                                <WorkflowReturnValueTooltip />
-                              </HoverCardContent>
-                            </HoverCard>
-                            <span className="text-xs text-muted-foreground">
-                              Define the data returned by the workflow.
-                            </span>
-                          </div>
-                          <span className="text-xs text-muted-foreground">
-                            If undefined, only the workflow run metadata is
-                            returned.
-                          </span>
-                          <ControlledYamlField fieldName="returns" />
-                        </div>
-                      </AccordionContent>
-                    </AccordionItem>
-                  </Accordion>
-                </TabsContent>
-              </div>
-            </div>
-          </form>
-        </Form>
-      </Tabs>
+                    <WorkflowInputSchemaTooltip />
+                  </HoverCardContent>
+                </HoverCard>
+                <span>Input schema</span>
+              </FormLabel>
+              <ControlledYamlField fieldName="expects" hideType />
+            </FormItem>
+
+            {/* Output schema */}
+            <FormItem>
+              <FormLabel className="flex items-center text-xs">
+                <HoverCard openDelay={100} closeDelay={100}>
+                  <HoverCardTrigger asChild className="hover:border-none">
+                    <Info className="mr-1 size-3 stroke-muted-foreground" />
+                  </HoverCardTrigger>
+                  <HoverCardContent
+                    className="w-[300px] p-3 font-mono text-xs tracking-tight"
+                    side="left"
+                    sideOffset={20}
+                  >
+                    <WorkflowReturnValueTooltip />
+                  </HoverCardContent>
+                </HoverCard>
+                <span>Output schema</span>
+              </FormLabel>
+              <ControlledYamlField fieldName="returns" hideType />
+            </FormItem>
+          </div>
+        </form>
+      </Form>
+    </div>
+  )
+}
+
+function WorkflowReadmePanel({
+  workflow,
+}: {
+  workflow: WorkflowRead
+}): React.JSX.Element {
+  const { updateWorkflow } = useWorkflow()
+  const [value, setValue] = useState(workflow.description ?? "")
+  const [isSaving, setIsSaving] = useState(false)
+  const savedValueRef = useRef(workflow.description ?? "")
+  const containerRef = useRef<HTMLDivElement>(null)
+  const isTooLong = value.length > 1000
+
+  useEffect(() => {
+    const nextValue = workflow.description ?? ""
+    const previousValue = savedValueRef.current
+    savedValueRef.current = nextValue
+    setValue((current) => (current === previousValue ? nextValue : current))
+  }, [workflow.description, workflow.id])
+
+  const persistReadme = useCallback(async () => {
+    if (isSaving) {
+      return
+    }
+
+    const nextValue = value ?? ""
+    if (nextValue === savedValueRef.current) {
+      return
+    }
+
+    if (isTooLong) {
+      return
+    }
+
+    const result = workflowReadmeSchema.safeParse(nextValue)
+    if (!result.success) {
+      return
+    }
+
+    setIsSaving(true)
+    try {
+      await updateWorkflow({ description: result.data })
+      savedValueRef.current = result.data
+    } finally {
+      setIsSaving(false)
+    }
+  }, [isSaving, isTooLong, updateWorkflow, value])
+
+  const handleContainerBlur = useCallback(
+    (event: React.FocusEvent<HTMLDivElement>) => {
+      const container = containerRef.current
+      const nextTarget = event.relatedTarget as Node | null
+      if (!container || !nextTarget || !container.contains(nextTarget)) {
+        void persistReadme()
+      }
+    },
+    [persistReadme]
+  )
+
+  const toolbarStatus = isTooLong ? (
+    <span className="text-xs text-destructive">Max 1000 characters</span>
+  ) : isSaving ? (
+    <span className="text-xs text-muted-foreground">Saving...</span>
+  ) : null
+
+  return (
+    <div
+      ref={containerRef}
+      onBlur={handleContainerBlur}
+      className="flex h-full flex-col overflow-auto p-4"
+    >
+      <div className="mb-4 space-y-1">
+        <h4 className="text-xs text-muted-foreground">
+          Edit workflow description
+        </h4>
+      </div>
+      <div className="min-h-[300px] flex-1 rounded-md border border-input bg-background [&_.simple-editor-content_.tiptap.ProseMirror.simple-editor]:p-3">
+        <SimpleEditor
+          value={value}
+          onChange={setValue}
+          onSave={() => void persistReadme()}
+          placeholder="Type some markdown here to start writing your README."
+          toolbarStatus={toolbarStatus}
+          className="h-full"
+          style={{ height: "100%" }}
+        />
+      </div>
     </div>
   )
 }

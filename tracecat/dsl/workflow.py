@@ -43,6 +43,7 @@ with workflow.unsafe.imports_passed_through():
     from tracecat.contexts import (
         ctx_interaction,
         ctx_logger,
+        ctx_logical_time,
         ctx_role,
         ctx_run,
         ctx_stream_id,
@@ -84,9 +85,11 @@ with workflow.unsafe.imports_passed_through():
     from tracecat.dsl.types import ActionErrorInfo, ActionErrorInfoAdapter
     from tracecat.dsl.validation import (
         NormalizeTriggerInputsActivityInputs,
+        ResolveTimeAnchorActivityInputs,
         ValidateTriggerInputsActivityInputs,
         format_input_schema_validation_error,
         normalize_trigger_inputs_activity,
+        resolve_time_anchor_activity,
         validate_trigger_inputs_activity,
     )
     from tracecat.ee.interactions.decorators import maybe_interactive
@@ -111,7 +114,11 @@ with workflow.unsafe.imports_passed_through():
         DSLValidationResult,
         ValidationDetailListTA,
     )
-    from tracecat.workflow.executions.enums import TemporalSearchAttr, TriggerType
+    from tracecat.workflow.executions.enums import (
+        ExecutionType,
+        TemporalSearchAttr,
+        TriggerType,
+    )
     from tracecat.workflow.executions.types import ErrorHandlerWorkflowInput
     from tracecat.workflow.management.definitions import (
         get_workflow_definition_activity,
@@ -121,6 +128,7 @@ with workflow.unsafe.imports_passed_through():
         GetErrorHandlerWorkflowIDActivityInputs,
         GetWorkflowDefinitionActivityInputs,
         ResolveWorkflowAliasActivityInputs,
+        WorkflowDefinitionActivityResult,
     )
     from tracecat.workflow.schedules.schemas import GetScheduleActivityInputs
     from tracecat.workflow.schedules.service import WorkflowSchedulesService
@@ -165,6 +173,8 @@ class DSLWorkflow:
         self.role = args.role
         self.start_to_close_timeout = args.timeout
         """The activity execution timeout."""
+        self.execution_type = args.execution_type
+        """Execution type (draft or published). Draft executions use draft aliases for child workflows."""
         wf_info = workflow.info()
         # Tracecat wf exec id == Temporal wf exec id
         self.wf_exec_id = wf_info.workflow_id
@@ -181,7 +191,9 @@ class DSLWorkflow:
         ctx_role.set(self.role)
         ctx_logger.set(self.logger)
 
-        self.logger.debug("DSL workflow started", args=args)
+        self.logger.debug(
+            "DSL workflow started", args=args, execution_type=self.execution_type
+        )
         try:
             self.logger.info(
                 "Workflow info",
@@ -214,17 +226,21 @@ class DSLWorkflow:
 
     @workflow.run
     async def run(self, args: DSLRunArgs) -> Any:
-        # Set DSL
+        # Set DSL and registry_lock
         if args.dsl:
             # Use the provided DSL
             self.logger.debug("Using provided workflow definition")
             self.dsl = args.dsl
+            # Use registry_lock from args if provided (e.g., from parent workflow)
+            self.registry_lock = args.registry_lock
             self.dispatch_type = "push"
         else:
             # Otherwise, fetch the latest workflow definition
             self.logger.debug("Fetching latest workflow definition")
             try:
-                self.dsl = await self._get_workflow_definition(args.wf_id)
+                result = await self._get_workflow_definition(args.wf_id)
+                self.dsl = result.dsl
+                self.registry_lock = result.registry_lock
             except TracecatException as e:
                 self.logger.error("Failed to fetch workflow definition")
                 raise ApplicationError(
@@ -233,6 +249,13 @@ class DSLWorkflow:
                     type=e.__class__.__name__,
                 ) from e
             self.dispatch_type = "pull"
+
+        # Log registry lock for debugging
+        self.logger.debug(
+            "Workflow registry lock",
+            registry_lock=self.registry_lock,
+            dispatch_type=self.dispatch_type,
+        )
 
         # Note that we can't run the error handler above this
         # Run the workflow with error handling
@@ -395,6 +418,26 @@ class DSLWorkflow:
                             type=e.__class__.__name__,
                         ) from cause
 
+        # Store workflow start time for computing elapsed time
+        self.wf_start_time = wf_info.start_time
+
+        # Resolve time anchor - recorded in history for replay/reset determinism
+        if args.time_anchor is not None:
+            # Use explicitly provided time anchor (e.g., from parent workflow or API override)
+            self.time_anchor = args.time_anchor
+        else:
+            # Compute time anchor via local activity (recorded in history)
+            self.time_anchor = await workflow.execute_local_activity(
+                resolve_time_anchor_activity,
+                arg=ResolveTimeAnchorActivityInputs(
+                    trigger_type=get_trigger_type(wf_info),
+                    start_time=wf_info.start_time,
+                    scheduled_start_time=self._get_scheduled_start_time(wf_info),
+                ),
+                start_to_close_timeout=timedelta(seconds=5),
+                retry_policy=RETRY_POLICIES["activity:fail_fast"],
+            )
+
         # Prepare user facing context
         self.context: ExecutionContext = {
             ExprContext.ACTIONS: {},
@@ -402,6 +445,7 @@ class DSLWorkflow:
             ExprContext.ENV: DSLEnvironment(
                 workflow={
                     "start_time": wf_info.start_time,
+                    "time_anchor": self.time_anchor,
                     "dispatch_type": self.dispatch_type,
                     "execution_id": self.wf_exec_id,
                     "run_id": self.wf_run_id,
@@ -544,6 +588,7 @@ class DSLWorkflow:
             # NOTE: This only works with successful results
             result = await self._execute_task(task)
             ctx[ExprContext.ACTIONS][task.ref] = result
+            self._set_logical_time_context()
             retry_until_result = eval_templated_object(retry_until.strip(), operand=ctx)
             if not isinstance(retry_until_result, bool):
                 try:
@@ -602,6 +647,7 @@ class DSLWorkflow:
                 case PlatformAction.AI_AGENT:
                     logger.info("Executing agent", task=task)
                     agent_operand = self._build_action_context(task, stream_id)
+                    self._set_logical_time_context()
                     evaluated_args = eval_templated_object(
                         task.args, operand=agent_operand
                     )
@@ -650,6 +696,7 @@ class DSLWorkflow:
                 case PlatformAction.AI_PRESET_AGENT:
                     logger.info("Executing preset agent", task=task)
                     agent_operand = self._build_action_context(task, stream_id)
+                    self._set_logical_time_context()
                     evaluated_args = eval_templated_object(
                         task.args, operand=agent_operand
                     )
@@ -924,18 +971,23 @@ class DSLWorkflow:
                     return None
         # Return some custom value that should be evaluated
         self.logger.trace("Returning value from expression")
+        self._set_logical_time_context()
         return eval_templated_object(self.dsl.returns, operand=self.context)
 
     async def _resolve_workflow_alias(self, wf_alias: str) -> identifiers.WorkflowID:
         # Evaluate the workflow alias as a templated expression
+        self._set_logical_time_context()
         evaluated_alias = eval_templated_object(wf_alias, operand=self.get_context())
         if not isinstance(evaluated_alias, str):
             raise TypeError(
                 f"Workflow alias expression must evaluate to a string. Got {type(evaluated_alias).__name__}"
             )
 
+        # For draft executions, use draft aliases; for published executions, use committed aliases
         activity_inputs = ResolveWorkflowAliasActivityInputs(
-            workflow_alias=evaluated_alias, role=self.role
+            workflow_alias=evaluated_alias,
+            role=self.role,
+            use_committed=self.execution_type == ExecutionType.PUBLISHED,
         )
         wf_id = await workflow.execute_activity(
             WorkflowsManagementService.resolve_workflow_alias_activity,
@@ -949,7 +1001,7 @@ class DSLWorkflow:
 
     async def _get_workflow_definition(
         self, workflow_id: identifiers.WorkflowID, version: int | None = None
-    ) -> DSLInput:
+    ) -> WorkflowDefinitionActivityResult:
         activity_inputs = GetWorkflowDefinitionActivityInputs(
             role=self.role, workflow_id=workflow_id, version=version
         )
@@ -1015,6 +1067,20 @@ class DSLWorkflow:
         )
         return schedule_read.inputs
 
+    def _get_scheduled_start_time(self, wf_info: workflow.Info) -> datetime | None:
+        """Extract TemporalScheduledStartTime from search attributes if available.
+
+        This is the intended schedule time for scheduled workflows, which may differ
+        from the actual start time if the worker was delayed.
+        """
+        from temporalio.common import SearchAttributeKey
+
+        try:
+            key = SearchAttributeKey.for_datetime("TemporalScheduledStartTime")
+            return wf_info.typed_search_attributes.get(key)
+        except Exception:
+            return None
+
     async def _validate_action(self, task: ActionStatement) -> None:
         result = await workflow.execute_activity(
             DSLActivities.validate_action_activity,
@@ -1046,7 +1112,8 @@ class DSLWorkflow:
         else:
             raise ValueError("Either workflow_id or workflow_alias must be provided")
 
-        dsl = await self._get_workflow_definition(child_wf_id, version=args.version)
+        result = await self._get_workflow_definition(child_wf_id, version=args.version)
+        dsl = result.dsl
 
         self.logger.debug(
             "Got workflow definition",
@@ -1063,6 +1130,14 @@ class DSLWorkflow:
         )
         self.logger.debug("Runtime config", runtime_config=runtime_config)
 
+        # Propagate time_anchor: use child's override if set, otherwise use parent's
+        # current logical time so child continues from parent's elapsed position
+        child_time_anchor = (
+            args.time_anchor
+            if args.time_anchor is not None
+            else self._compute_logical_time()
+        )
+
         return DSLRunArgs(
             role=self.role,
             dsl=dsl,
@@ -1070,6 +1145,10 @@ class DSLWorkflow:
             parent_run_context=ctx_run.get(),
             trigger_inputs=args.trigger_inputs,
             runtime_config=runtime_config,
+            execution_type=self.execution_type,
+            time_anchor=child_time_anchor,
+            # Use child's own registry_lock from its definition, not parent's
+            registry_lock=result.registry_lock,
         )
 
     async def _noop_gather_action(self, task: ActionStatement) -> Any:
@@ -1086,6 +1165,7 @@ class DSLWorkflow:
             exec_context=new_context,
             interaction_context=ctx_interaction.get(),
             stream_id=stream_id,
+            registry_lock=self.registry_lock,
         )
 
         return await workflow.execute_local_activity(
@@ -1105,16 +1185,35 @@ class DSLWorkflow:
         """Construct the execution context for an action with resolved dependencies."""
         return self.scheduler.build_stream_aware_context(task, stream_id)
 
+    def _compute_logical_time(self) -> datetime:
+        """Compute the current logical time = time_anchor + elapsed workflow time.
+
+        This provides deterministic time during workflow replay since workflow.now()
+        is recorded in history and replayed identically.
+        """
+        elapsed = workflow.now() - self.wf_start_time
+        return self.time_anchor + elapsed
+
+    def _set_logical_time_context(self) -> None:
+        """Set ctx_logical_time for deterministic FN.now() in template evaluations."""
+        ctx_logical_time.set(self._compute_logical_time())
+
     async def _run_action(self, task: ActionStatement) -> Any:
         # XXX(perf): We shouldn't pass the full execution context to the activity
         # We should only keep the contexts that are needed for the action
         stream_id = ctx_stream_id.get()
         new_context = self._build_action_context(task, stream_id)
 
+        # Inject current logical_time into the workflow context for FN.now() etc.
+        if env_context := new_context.get(ExprContext.ENV):
+            if workflow_ctx := env_context.get("workflow"):
+                workflow_ctx["logical_time"] = self._compute_logical_time()
+
         # Check if action has environment override
         run_context = self.run_context
         if task.environment is not None:
             # Evaluate the environment expression
+            self._set_logical_time_context()
             evaluated_env = eval_templated_object(task.environment, operand=new_context)
             # Create a new run context with the overridden environment
             run_context = self.run_context.model_copy(
@@ -1133,11 +1232,15 @@ class DSLWorkflow:
             interaction_context=ctx_interaction.get(),
             stream_id=stream_id,
             session_id=session_id,
+            registry_lock=self.registry_lock,
         )
 
+        # Dispatch to ExecutorWorker on shared-action-queue
+        # Using string activity name since it's registered on a different worker
         return await workflow.execute_activity(
-            DSLActivities.run_action_activity,
+            "execute_action_activity",
             args=(arg, self.role),
+            task_queue=config.TRACECAT__EXECUTOR_QUEUE,
             start_to_close_timeout=timedelta(
                 seconds=task.start_delay + task.retry_policy.timeout
             ),
@@ -1229,7 +1332,8 @@ class DSLWorkflow:
     ) -> DSLRunArgs:
         """Grab a workflow definition and create error handler workflow run args"""
 
-        dsl = await self._get_workflow_definition(handler_wf_id)
+        result = await self._get_workflow_definition(handler_wf_id)
+        dsl = result.dsl
 
         self.logger.debug(
             "Got workflow definition for error handler",
@@ -1278,6 +1382,9 @@ class DSLWorkflow:
                 trigger_type=trigger_type,
             ),
             runtime_config=runtime_config,
+            execution_type=self.execution_type,
+            # Use error handler's own registry_lock from its definition, not parent's
+            registry_lock=result.registry_lock,
         )
 
     async def _run_error_handler_workflow(

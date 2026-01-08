@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
-from typing import Any, Self, cast
+from typing import Any, Literal, NotRequired, Self, TypedDict, cast
 
 import orjson
 import temporalio.api.common.v1
@@ -15,6 +15,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    TypeAdapter,
     ValidationError,
     field_validator,
     model_validator,
@@ -64,14 +65,40 @@ from tracecat.exceptions import (
 from tracecat.expressions.common import ExprContext
 from tracecat.expressions.core import extract_expressions
 from tracecat.expressions.expectations import ExpectedField
+from tracecat.identifiers import ActionID
 from tracecat.identifiers.schedules import ScheduleUUID
 from tracecat.identifiers.workflow import AnyWorkflowID, WorkflowUUID
 from tracecat.interactions.schemas import ActionInteractionValidator
 from tracecat.logger import logger
 from tracecat.workflow.actions.schemas import ActionControlFlow
-from tracecat.workflow.executions.enums import TemporalSearchAttr, TriggerType
+from tracecat.workflow.executions.enums import (
+    ExecutionType,
+    TemporalSearchAttr,
+    TriggerType,
+)
 
 _memo_payload_converter = PydanticPayloadConverter()
+
+
+class UpstreamEdgeData(TypedDict):
+    """Type definition for upstream edge data stored in Action.upstream_edges.
+
+    This represents a single edge connecting a source node to a target action.
+    The source_id is required, while source_type and source_handle are optional.
+    """
+
+    source_id: str
+    """The ID of the source node (action UUID or trigger ID)."""
+
+    source_type: NotRequired[Literal["trigger", "udf"]]
+    """The type of the source node."""
+
+    source_handle: NotRequired[Literal["success", "error"]]
+    """The edge type, defaults to 'success' if not specified."""
+
+
+UpstreamEdgeDataValidator = TypeAdapter(UpstreamEdgeData)
+"""TypeAdapter for validating upstream edge data at runtime."""
 
 
 class DSLEntrypoint(BaseModel):
@@ -385,10 +412,16 @@ class DSLInput(BaseModel):
     def dump_yaml(self) -> str:
         return yaml.dump(self.model_dump())
 
-    def to_graph(self, trigger_node: TriggerNode, ref2id: dict[str, str]) -> RFGraph:
+    def to_graph(
+        self, trigger_node: TriggerNode, ref2id: dict[str, ActionID]
+    ) -> RFGraph:
         """Construct a new react flow graph from this DSLInput.
 
         We depend on the trigger from the old graph to create the new graph.
+
+        Args:
+            trigger_node: The trigger node from the workflow
+            ref2id: Mapping from action ref (slugified title) to action ID (UUID)
         """
 
         # Create nodes and edges
@@ -455,6 +488,22 @@ class DSLRunArgs(BaseModel):
         default=None,
         description="The schedule ID that triggered this workflow, if any. Auto-converts from legacy 'sch-<hex>' format.",
     )
+    execution_type: ExecutionType = Field(
+        default=ExecutionType.PUBLISHED,
+        description="Execution type (draft or published). Draft executions use draft aliases for child workflows.",
+    )
+    time_anchor: datetime | None = Field(
+        default=None,
+        description=(
+            "The workflow's logical time anchor for FN.now() and related functions. "
+            "If not provided, computed from TemporalScheduledStartTime (for schedules) "
+            "or workflow start_time (for other triggers). Stored as UTC."
+        ),
+    )
+    registry_lock: dict[str, str] | None = Field(
+        default=None,
+        description="Registry version lock for action execution. Maps action names to version hashes.",
+    )
 
     @field_validator("wf_id", mode="before")
     @classmethod
@@ -474,6 +523,10 @@ class ExecuteChildWorkflowArgs(BaseModel):
     fail_strategy: FailStrategy = FailStrategy.ISOLATED
     timeout: float | None = None
     wait_strategy: WaitStrategy = WaitStrategy.WAIT
+    time_anchor: datetime | None = Field(
+        default=None,
+        description="Override time anchor for child workflow. If None, inherits from parent.",
+    )
 
     @model_validator(mode="after")
     def validate_workflow_id_or_alias(self) -> Self:
@@ -603,29 +656,48 @@ def context_locator(
     return f"{ctx}.{stmt.ref} -> {loc}"
 
 
-def build_action_statements(
-    graph: RFGraph, actions: list[Action]
+def build_action_statements_from_actions(
+    actions: list[Action],
 ) -> list[ActionStatement]:
-    """Convert DB Actions into ActionStatements using the graph."""
-    # Use string keys since graph node IDs are strings (UUID format)
-    id2action = {str(action.id): action for action in actions}
+    """Convert DB Actions into ActionStatements using upstream_edges.
+
+    This function uses Action.upstream_edges directly as the source of truth
+    for dependencies, eliminating the need for a separate RFGraph object.
+    """
+    id2action = {action.id: action for action in actions}
 
     statements = []
-    for node in graph.action_nodes():
+    for action in actions:
         dependencies: list[str] = []
-        for dep_act_id in graph.dep_list[node.id]:
-            base_ref = id2action[dep_act_id].ref
-            for edge in graph.edges:
-                if edge.source != dep_act_id or edge.target != node.id:
-                    continue
-                if edge.source_handle == EdgeType.ERROR:
-                    ref = dep_from_edge_components(base_ref, edge.source_handle)
+
+        # Build dependencies from upstream_edges
+        for edge_data in action.upstream_edges:
+            # Validate edge data at runtime using TypeAdapter
+            edge = UpstreamEdgeDataValidator.validate_python(edge_data)
+            source_id_str = edge.get("source_id")
+            source_handle = edge.get("source_handle", "success")
+
+            # Convert string source_id to ActionID (UUID) for lookup
+            if source_id_str:
+                try:
+                    source_id = ActionID(source_id_str)
+                except ValueError:
+                    continue  # Skip invalid UUIDs
+            else:
+                continue
+
+            if source_id in id2action:
+                source_action = id2action[source_id]
+                base_ref = source_action.ref
+
+                if source_handle == "error":
+                    ref = dep_from_edge_components(base_ref, EdgeType.ERROR)
                 else:
                     ref = base_ref
                 dependencies.append(ref)
+
         dependencies = sorted(dependencies)
 
-        action = id2action[node.id]
         control_flow = ActionControlFlow.model_validate(action.control_flow)
         args = yaml.safe_load(action.inputs) or {}
         interaction = (
@@ -690,6 +762,17 @@ def get_trigger_type_from_search_attr(
         )
         return TriggerType.MANUAL
     return TriggerType(trigger_type)
+
+
+def get_execution_type_from_search_attr(
+    search_attributes: TypedSearchAttributes,
+) -> ExecutionType:
+    """Extract execution type from search attributes."""
+    execution_type = search_attributes.get(TemporalSearchAttr.EXECUTION_TYPE.key)
+    if execution_type is None:
+        # Default to published for historical executions without the attribute
+        return ExecutionType.PUBLISHED
+    return ExecutionType(execution_type)
 
 
 NON_RETRYABLE_ERROR_TYPES = [

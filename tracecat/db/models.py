@@ -507,6 +507,17 @@ class WorkflowDefinition(WorkspaceModel):
         ForeignKey("workflow.id", ondelete="CASCADE"),
     )
     content: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=True, default=dict)
+    alias: Mapped[str | None] = mapped_column(
+        String, nullable=True, index=True, doc="Workflow alias at commit time"
+    )
+    registry_lock: Mapped[dict[str, str] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        doc=(
+            "Frozen registry versions at commit time. "
+            "Maps repository origin to version string."
+        ),
+    )
 
     workflow: Mapped[Workflow] = relationship(back_populates="definitions")
 
@@ -570,12 +581,12 @@ class WorkflowTag(Base):
 
     tag_id: Mapped[uuid.UUID] = mapped_column(
         UUID,
-        ForeignKey("tag.id"),
+        ForeignKey("tag.id", ondelete="CASCADE"),
         nullable=False,
     )
     workflow_id: Mapped[uuid.UUID] = mapped_column(
         UUID,
-        ForeignKey("workflow.id"),
+        ForeignKey("workflow.id", ondelete="CASCADE"),
         nullable=False,
     )
 
@@ -627,8 +638,41 @@ class Workflow(WorkspaceModel):
     returns: Mapped[Any | None] = mapped_column(
         JSONB, nullable=True, doc="Workflow return values"
     )
-    object: Mapped[dict[str, Any] | None] = mapped_column(
-        JSONB, nullable=True, doc="React flow graph object"
+    trigger_position_x: Mapped[float] = mapped_column(
+        Float,
+        default=0.0,
+        nullable=False,
+        doc="Trigger node X position",
+    )
+    trigger_position_y: Mapped[float] = mapped_column(
+        Float,
+        default=0.0,
+        nullable=False,
+        doc="Trigger node Y position",
+    )
+    graph_version: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        nullable=False,
+        doc="Graph version for optimistic concurrency control. Incremented on each graph mutation.",
+    )
+    viewport_x: Mapped[float] = mapped_column(
+        Float,
+        default=0.0,
+        nullable=False,
+        doc="Viewport X position",
+    )
+    viewport_y: Mapped[float] = mapped_column(
+        Float,
+        default=0.0,
+        nullable=False,
+        doc="Viewport Y position",
+    )
+    viewport_zoom: Mapped[float] = mapped_column(
+        Float,
+        default=1.0,
+        nullable=False,
+        doc="Viewport zoom level",
     )
     config: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
@@ -650,7 +694,7 @@ class Workflow(WorkspaceModel):
         nullable=True,
         doc=(
             "Maps repository origin to pinned version string. "
-            "Example: {'builtin': '1.2.3', 'git+ssh://...': '0.5.0'}"
+            "Example: {'tracecat_registry': '1.2.3', 'git+ssh://...': '0.5.0'}"
         ),
     )
     folder_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -893,10 +937,28 @@ class Action(WorkspaceModel):
         nullable=True,
         doc="Override environment for this action's execution",
     )
+    position_x: Mapped[float] = mapped_column(
+        Float,
+        default=0.0,
+        nullable=False,
+        doc="Node X position in workflow canvas",
+    )
+    position_y: Mapped[float] = mapped_column(
+        Float,
+        default=0.0,
+        nullable=False,
+        doc="Node Y position in workflow canvas",
+    )
+    upstream_edges: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB,
+        default=list,
+        nullable=False,
+        doc="List of incoming edges: [{'source_id': 'act-xxx', 'source_handle': 'success'}]",
+    )
     workflow_id: Mapped[uuid.UUID] = mapped_column(
         UUID,
         ForeignKey("workflow.id", ondelete="CASCADE"),
-        nullable=True,
+        nullable=False,
     )
 
     workflow: Mapped[Workflow] = relationship(back_populates="actions")
@@ -1054,10 +1116,10 @@ class RegistryVersion(OrganizationModel):
         nullable=False,
         doc="Frozen action definitions",
     )
-    wheel_uri: Mapped[str] = mapped_column(
+    tarball_uri: Mapped[str] = mapped_column(
         String,
         nullable=False,
-        doc="S3 URI to the wheel file",
+        doc="S3 URI to the compressed tarball venv for action execution",
     )
 
     repository: Mapped[RegistryRepository] = relationship(back_populates="versions")
@@ -2319,6 +2381,13 @@ class ChatMessage(WorkspaceModel):
         index=True,
     )
     kind: Mapped[str] = mapped_column(String, nullable=False, doc="The kind of message")
+    harness: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default="pydantic-ai",
+        server_default="pydantic-ai",
+        doc="The harness type that created this message (e.g., pydantic-ai, claude)",
+    )
     data: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         default=dict,

@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -35,13 +36,26 @@ from tracecat.auth.users import (
     auth_backend,
     fastapi_users,
 )
+from tracecat.cases.attachments.internal_router import (
+    router as internal_case_attachments_router,
+)
 from tracecat.cases.attachments.router import router as case_attachments_router
 from tracecat.cases.durations.router import router as case_durations_router
+from tracecat.cases.internal_router import (
+    comments_router as internal_comments_router,
+)
+from tracecat.cases.internal_router import (
+    router as internal_cases_router,
+)
 from tracecat.cases.router import case_fields_router as case_fields_router
 from tracecat.cases.router import cases_router as cases_router
+from tracecat.cases.tag_definitions.internal_router import (
+    router as internal_case_tag_definitions_router,
+)
 from tracecat.cases.tag_definitions.router import (
     router as case_tag_definitions_router,
 )
+from tracecat.cases.tags.internal_router import router as internal_case_tags_router
 from tracecat.cases.tags.router import router as case_tags_router
 from tracecat.chat.router import router as chat_router
 from tracecat.contexts import ctx_role
@@ -49,7 +63,11 @@ from tracecat.db.dependencies import AsyncDBSession
 from tracecat.db.engine import get_async_session_context_manager
 from tracecat.editor.router import router as editor_router
 from tracecat.exceptions import TracecatException
-from tracecat.feature_flags import FeatureFlag, feature_flag_dep
+from tracecat.feature_flags import (
+    FeatureFlag,
+    FlagLike,
+    is_feature_enabled,
+)
 from tracecat.feature_flags.router import router as feature_flags_router
 from tracecat.integrations.router import (
     integrations_router,
@@ -71,6 +89,7 @@ from tracecat.secrets.router import router as secrets_router
 from tracecat.settings.router import router as org_settings_router
 from tracecat.settings.service import SettingsService, get_setting_override
 from tracecat.storage.blob import ensure_bucket_exists
+from tracecat.tables.internal_router import router as internal_tables_router
 from tracecat.tables.router import router as tables_router
 from tracecat.tags.router import router as tags_router
 from tracecat.variables.router import router as variables_router
@@ -78,6 +97,7 @@ from tracecat.vcs.router import org_router as vcs_router
 from tracecat.webhooks.router import router as webhook_router
 from tracecat.workflow.actions.router import router as workflow_actions_router
 from tracecat.workflow.executions.router import router as workflow_executions_router
+from tracecat.workflow.graph.router import router as workflow_graph_router
 from tracecat.workflow.management.folders.router import (
     router as workflow_folders_router,
 )
@@ -108,6 +128,7 @@ async def lifespan(app: FastAPI):
 
     # Storage
     await ensure_bucket_exists(config.TRACECAT__BLOB_STORAGE_BUCKET_ATTACHMENTS)
+    await ensure_bucket_exists(config.TRACECAT__BLOB_STORAGE_BUCKET_REGISTRY)
 
     # App
     role = bootstrap_role()
@@ -186,6 +207,20 @@ def fastapi_users_auth_exception_handler(request: Request, exc: FastAPIUsersExce
     return ORJSONResponse(status_code=status_code, content={"detail": msg})
 
 
+def feature_flag_dep(flag: FlagLike) -> Callable[..., None]:
+    """Check if a feature flag is enabled."""
+
+    def _is_feature_enabled() -> None:
+        if not is_feature_enabled(flag):
+            logger.debug("Feature flag is not enabled", flag=flag)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Feature not enabled"
+            )
+        logger.debug("Feature flag is enabled", flag=flag)
+
+    return _is_feature_enabled
+
+
 def create_app(**kwargs) -> FastAPI:
     if config.TRACECAT__ALLOW_ORIGINS is not None:
         allow_origins = config.TRACECAT__ALLOW_ORIGINS.split(",")
@@ -229,6 +264,7 @@ def create_app(**kwargs) -> FastAPI:
     app.include_router(webhook_router)
     app.include_router(workspaces_router)
     app.include_router(workflow_management_router)
+    app.include_router(workflow_graph_router)
     app.include_router(workflow_executions_router)
     app.include_router(workflow_actions_router)
     app.include_router(workflow_tags_router)
@@ -275,6 +311,13 @@ def create_app(**kwargs) -> FastAPI:
         prefix="/users",
         tags=["users"],
     )
+    # Internal routers
+    app.include_router(internal_case_attachments_router)
+    app.include_router(internal_cases_router)
+    app.include_router(internal_comments_router)
+    app.include_router(internal_case_tags_router)
+    app.include_router(internal_case_tag_definitions_router)
+    app.include_router(internal_tables_router)
 
     if AuthType.BASIC in config.TRACECAT__AUTH_TYPES:
         app.include_router(

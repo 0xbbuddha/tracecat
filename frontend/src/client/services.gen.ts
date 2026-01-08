@@ -4,6 +4,8 @@ import type { CancelablePromise } from "./core/CancelablePromise"
 import { OpenAPI } from "./core/OpenAPI"
 import { request as __request } from "./core/request"
 import type {
+  ActionsBatchUpdatePositionsData,
+  ActionsBatchUpdatePositionsResponse,
   ActionsCreateActionData,
   ActionsCreateActionResponse,
   ActionsDeleteActionData,
@@ -155,6 +157,8 @@ import type {
   ChatChatWithVercelStreamingResponse,
   ChatCreateChatData,
   ChatCreateChatResponse,
+  ChatDeleteChatData,
+  ChatDeleteChatResponse,
   ChatGetChatData,
   ChatGetChatResponse,
   ChatGetChatVercelData,
@@ -187,6 +191,10 @@ import type {
   FoldersMoveFolderResponse,
   FoldersUpdateFolderData,
   FoldersUpdateFolderResponse,
+  GraphApplyGraphOperationsData,
+  GraphApplyGraphOperationsResponse,
+  GraphGetGraphData,
+  GraphGetGraphResponse,
   IntegrationsConnectProviderData,
   IntegrationsConnectProviderResponse,
   IntegrationsDeleteIntegrationData,
@@ -239,6 +247,8 @@ import type {
   ProvidersListProvidersResponse,
   PublicCheckHealthResponse,
   PublicCheckReadyResponse,
+  PublicIncomingWebhookDraftData,
+  PublicIncomingWebhookDraftResponse,
   PublicIncomingWebhookGetData,
   PublicIncomingWebhookGetResponse,
   PublicIncomingWebhookPostData,
@@ -288,6 +298,8 @@ import type {
   SecretsDeleteSecretByIdResponse,
   SecretsGetSecretByNameData,
   SecretsGetSecretByNameResponse,
+  SecretsListSecretDefinitionsData,
+  SecretsListSecretDefinitionsResponse,
   SecretsListSecretsData,
   SecretsListSecretsResponse,
   SecretsSearchSecretsData,
@@ -400,6 +412,8 @@ import type {
   VcsSaveGithubAppCredentialsResponse,
   WorkflowExecutionsCancelWorkflowExecutionData,
   WorkflowExecutionsCancelWorkflowExecutionResponse,
+  WorkflowExecutionsCreateDraftWorkflowExecutionData,
+  WorkflowExecutionsCreateDraftWorkflowExecutionResponse,
   WorkflowExecutionsCreateWorkflowExecutionData,
   WorkflowExecutionsCreateWorkflowExecutionResponse,
   WorkflowExecutionsGetWorkflowExecutionCompactData,
@@ -570,6 +584,38 @@ export const publicIncomingWebhookWait = (
   return __request(OpenAPI, {
     method: "POST",
     url: "/webhooks/{workflow_id}/{secret}/wait",
+    path: {
+      secret: data.secret,
+      workflow_id: data.workflowId,
+    },
+    headers: {
+      "content-type": data.contentType,
+    },
+    errors: {
+      422: "Validation Error",
+    },
+  })
+}
+
+/**
+ * Incoming Webhook Draft
+ * Draft webhook endpoint to trigger a workflow execution using the draft workflow graph.
+ *
+ * This endpoint runs the current (uncommitted) workflow graph rather than the committed definition.
+ * Child workflows using aliases will resolve to the latest draft aliases, not committed aliases.
+ * @param data The data for the request.
+ * @param data.secret
+ * @param data.workflowId
+ * @param data.contentType
+ * @returns unknown Successful Response
+ * @throws ApiError
+ */
+export const publicIncomingWebhookDraft = (
+  data: PublicIncomingWebhookDraftData
+): CancelablePromise<PublicIncomingWebhookDraftResponse> => {
+  return __request(OpenAPI, {
+    method: "POST",
+    url: "/webhooks/{workflow_id}/{secret}/draft",
     path: {
       secret: data.secret,
       workflow_id: data.workflowId,
@@ -1118,12 +1164,17 @@ export const workflowsCommitWorkflow = (
  * Export Workflow
  * Export a workflow's current state and optionally its definitions and logs.
  *
- * Supported formats are JSON and CSV.
+ * Supported formats are JSON and YAML.
+ *
+ * When `draft=True`, exports the current draft state from the workflow canvas
+ * without requiring a saved definition. When `draft=False` (default), exports
+ * from a saved workflow definition version.
  * @param data The data for the request.
  * @param data.workflowId
  * @param data.workspaceId
  * @param data.format Export format: 'json' or 'yaml'
  * @param data.version Workflow definition version. If not provided, the latest version is exported.
+ * @param data.draft Export current draft state instead of saved definition.
  * @returns unknown Successful Response
  * @throws ApiError
  */
@@ -1139,6 +1190,7 @@ export const workflowsExportWorkflow = (
     query: {
       format: data.format,
       version: data.version,
+      draft: data.draft,
       workspace_id: data.workspaceId,
     },
     errors: {
@@ -1431,6 +1483,69 @@ export const workflowsMoveWorkflowToFolder = (
 }
 
 /**
+ * Get Graph
+ * Get the canonical graph projection for a workflow.
+ *
+ * Returns the graph built from Actions (single source of truth),
+ * not from Workflow.object.
+ * @param data The data for the request.
+ * @param data.workflowId
+ * @param data.workspaceId
+ * @returns GraphResponse Successful Response
+ * @throws ApiError
+ */
+export const graphGetGraph = (
+  data: GraphGetGraphData
+): CancelablePromise<GraphGetGraphResponse> => {
+  return __request(OpenAPI, {
+    method: "GET",
+    url: "/workflows/{workflow_id}/graph",
+    path: {
+      workflow_id: data.workflowId,
+    },
+    query: {
+      workspace_id: data.workspaceId,
+    },
+    errors: {
+      422: "Validation Error",
+    },
+  })
+}
+
+/**
+ * Apply Graph Operations
+ * Apply graph operations with optimistic concurrency.
+ *
+ * Validates base_version matches current graph_version.
+ * Returns 409 Conflict with latest graph if versions mismatch.
+ * @param data The data for the request.
+ * @param data.workflowId
+ * @param data.workspaceId
+ * @param data.requestBody
+ * @returns GraphResponse Successful Response
+ * @throws ApiError
+ */
+export const graphApplyGraphOperations = (
+  data: GraphApplyGraphOperationsData
+): CancelablePromise<GraphApplyGraphOperationsResponse> => {
+  return __request(OpenAPI, {
+    method: "PATCH",
+    url: "/workflows/{workflow_id}/graph",
+    path: {
+      workflow_id: data.workflowId,
+    },
+    query: {
+      workspace_id: data.workspaceId,
+    },
+    body: data.requestBody,
+    mediaType: "application/json",
+    errors: {
+      422: "Validation Error",
+    },
+  })
+}
+
+/**
  * List Workflow Executions
  * List all workflow executions.
  * @param data The data for the request.
@@ -1542,6 +1657,35 @@ export const workflowExecutionsGetWorkflowExecutionCompact = (
 }
 
 /**
+ * Create Draft Workflow Execution
+ * Create and schedule a draft workflow execution.
+ *
+ * Draft executions run the current draft workflow graph (not the committed definition).
+ * Child workflows using aliases will resolve to the latest draft aliases, not committed aliases.
+ * @param data The data for the request.
+ * @param data.workspaceId
+ * @param data.requestBody
+ * @returns WorkflowExecutionCreateResponse Successful Response
+ * @throws ApiError
+ */
+export const workflowExecutionsCreateDraftWorkflowExecution = (
+  data: WorkflowExecutionsCreateDraftWorkflowExecutionData
+): CancelablePromise<WorkflowExecutionsCreateDraftWorkflowExecutionResponse> => {
+  return __request(OpenAPI, {
+    method: "POST",
+    url: "/workflow-executions/draft",
+    query: {
+      workspace_id: data.workspaceId,
+    },
+    body: data.requestBody,
+    mediaType: "application/json",
+    errors: {
+      422: "Validation Error",
+    },
+  })
+}
+
+/**
  * Cancel Workflow Execution
  * Get a workflow execution.
  * @param data The data for the request.
@@ -1589,6 +1733,37 @@ export const workflowExecutionsTerminateWorkflowExecution = (
     },
     query: {
       workspace_id: data.workspaceId,
+    },
+    body: data.requestBody,
+    mediaType: "application/json",
+    errors: {
+      422: "Validation Error",
+    },
+  })
+}
+
+/**
+ * Batch Update Positions
+ * Batch update action and trigger positions.
+ *
+ * This endpoint updates all positions in a single transaction for atomicity,
+ * preventing race conditions from concurrent position updates.
+ * @param data The data for the request.
+ * @param data.workspaceId
+ * @param data.workflowId
+ * @param data.requestBody
+ * @returns void Successful Response
+ * @throws ApiError
+ */
+export const actionsBatchUpdatePositions = (
+  data: ActionsBatchUpdatePositionsData
+): CancelablePromise<ActionsBatchUpdatePositionsResponse> => {
+  return __request(OpenAPI, {
+    method: "POST",
+    url: "/actions/batch-positions",
+    query: {
+      workspace_id: data.workspaceId,
+      workflow_id: data.workflowId,
     },
     body: data.requestBody,
     mediaType: "application/json",
@@ -1989,6 +2164,29 @@ export const secretsCreateSecret = (
     },
     body: data.requestBody,
     mediaType: "application/json",
+    errors: {
+      422: "Validation Error",
+    },
+  })
+}
+
+/**
+ * List Secret Definitions
+ * List registry secret definitions.
+ * @param data The data for the request.
+ * @param data.workspaceId
+ * @returns SecretDefinition Successful Response
+ * @throws ApiError
+ */
+export const secretsListSecretDefinitions = (
+  data: SecretsListSecretDefinitionsData
+): CancelablePromise<SecretsListSecretDefinitionsResponse> => {
+  return __request(OpenAPI, {
+    method: "GET",
+    url: "/secrets/definitions",
+    query: {
+      workspace_id: data.workspaceId,
+    },
     errors: {
       422: "Validation Error",
     },
@@ -5586,6 +5784,33 @@ export const chatUpdateChat = (
     },
     body: data.requestBody,
     mediaType: "application/json",
+    errors: {
+      422: "Validation Error",
+    },
+  })
+}
+
+/**
+ * Delete Chat
+ * Delete a chat.
+ * @param data The data for the request.
+ * @param data.chatId
+ * @param data.workspaceId
+ * @returns void Successful Response
+ * @throws ApiError
+ */
+export const chatDeleteChat = (
+  data: ChatDeleteChatData
+): CancelablePromise<ChatDeleteChatResponse> => {
+  return __request(OpenAPI, {
+    method: "DELETE",
+    url: "/chat/{chat_id}",
+    path: {
+      chat_id: data.chatId,
+    },
+    query: {
+      workspace_id: data.workspaceId,
+    },
     errors: {
       422: "Validation Error",
     },

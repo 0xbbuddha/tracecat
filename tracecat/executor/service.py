@@ -3,30 +3,26 @@ from __future__ import annotations
 import asyncio
 import itertools
 import time
-import traceback
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from datetime import datetime
 from typing import Any, cast
 
-import ray
-import uvloop
-from pydantic_core import to_jsonable_python
-from ray.exceptions import RayTaskError
-from ray.runtime_env import RuntimeEnv
+from sqlalchemy import func, select
+from sqlalchemy.orm import aliased
 
 from tracecat import config
+from tracecat.auth.executor_tokens import mint_executor_token
 from tracecat.auth.types import Role
 from tracecat.concurrency import GatheringTaskGroup
 from tracecat.contexts import (
     ctx_interaction,
-    ctx_logger,
+    ctx_logical_time,
     ctx_role,
-    ctx_run,
-    ctx_session_id,
     with_session,
 )
-from tracecat.db.engine import get_async_engine, get_async_session_context_manager
+from tracecat.db.engine import get_async_session_context_manager
+from tracecat.db.models import RegistryRepository, RegistryVersion
 from tracecat.dsl.common import context_locator, create_default_execution_context
 from tracecat.dsl.schemas import (
     ActionStatement,
@@ -40,24 +36,40 @@ from tracecat.exceptions import (
     TracecatAuthorizationError,
     TracecatException,
 )
-from tracecat.executor.schemas import ExecutorActionErrorInfo
+from tracecat.executor.action_runner import get_action_runner
+from tracecat.executor.backends.base import ExecutorBackend
+from tracecat.executor.schemas import (
+    ActionImplementation,
+    ExecutorActionErrorInfo,
+    ExecutorResultSuccess,
+    ResolvedContext,
+)
 from tracecat.expressions.common import ExprContext, ExprOperand
 from tracecat.expressions.eval import (
     collect_expressions,
     eval_templated_object,
     get_iterables_from_expression,
 )
-from tracecat.git.types import GitUrl
-from tracecat.git.utils import safe_prepare_git_url
 from tracecat.logger import logger
-from tracecat.parse import get_pyproject_toml_required_deps, traverse_leaves
-from tracecat.registry.actions.schemas import BoundRegistryAction
+from tracecat.parse import traverse_leaves
+from tracecat.registry.actions.bound import BoundRegistryAction
+from tracecat.registry.actions.schemas import (
+    RegistryActionImplValidator,
+    TemplateActionDefinition,
+)
 from tracecat.registry.actions.service import RegistryActionsService
 from tracecat.secrets import secrets_manager
 from tracecat.secrets.common import apply_masks_object
-from tracecat.ssh import get_ssh_command
 from tracecat.variables.schemas import VariableSearch
 from tracecat.variables.service import VariablesService
+
+try:
+    from tracecat_registry import secrets as registry_secrets
+    from tracecat_registry.context import RegistryContext, set_context
+except ImportError:
+    RegistryContext = None  # type: ignore[misc, assignment]
+    set_context = None  # type: ignore[assignment]
+    registry_secrets = None  # type: ignore[assignment]
 
 """All these methods are used in the registry executor, not on the worker"""
 
@@ -69,89 +81,148 @@ type ExecutionResult = Any | ExecutorActionErrorInfo
 @dataclass
 class DispatchActionContext:
     role: Role
-    ssh_command: str | None = None
-    git_url: GitUrl | None = None
 
 
-_git_context_lock = asyncio.Lock()
-_git_context_cache: dict[str, tuple[float, Any, str | None]] = {}
+@dataclass
+class RegistryArtifactsContext:
+    origin: str
+    version: str
+    tarball_uri: str
 
 
-async def get_git_context_cached(role: Role) -> tuple[Any | None, str | None]:
-    """Cache git URL and SSH command for 60 seconds to avoid repeated DB sessions.
+_registry_artifacts_cache: dict[str, tuple[float, list[RegistryArtifactsContext]]] = {}
 
-    Returns:
-        Tuple of (git_url, ssh_command) or (None, None) if not configured
+
+async def get_registry_artifacts_cached(role: Role) -> list[RegistryArtifactsContext]:
+    """Get latest registry tarball URIs, cached per workspace.
+
+    Uses a simple TTL cache. No locking - if multiple concurrent requests
+    hit an expired cache, they'll all query the DB (harmless duplicate work).
     """
     cache_key = str(role.workspace_id)
-
-    # Check cache first
-    if cached := _git_context_cache.get(cache_key):
-        expire_time, git_url, ssh_cmd = cached
+    if cached := _registry_artifacts_cache.get(cache_key):
+        expire_time, artifacts = cached
         if time.time() < expire_time:
-            logger.debug("Using cached git context", workspace_id=role.workspace_id)
-            return git_url, ssh_cmd
+            return artifacts
 
-    # Load once under lock
-    async with _git_context_lock:
-        # Double-check after acquiring lock
-        if cached := _git_context_cache.get(cache_key):
-            expire_time, git_url, ssh_cmd = cached
-            if time.time() < expire_time:
-                return git_url, ssh_cmd
-
-        # Actually fetch from database
-        logger.debug(
-            "Fetching git context from database", workspace_id=role.workspace_id
+    # Cache miss or expired - fetch from DB
+    logger.info("Querying latest registry artifacts from DB", cache_key=cache_key)
+    async with (
+        get_async_session_context_manager() as session,
+        with_session(session=session),
+    ):
+        subq = (
+            select(
+                RegistryVersion.repository_id,
+                func.max(RegistryVersion.created_at).label("max_created_at"),
+            )
+            .where(RegistryVersion.organization_id == config.TRACECAT__DEFAULT_ORG_ID)
+            .group_by(RegistryVersion.repository_id)
+            .subquery()
         )
-        async with (
-            get_async_session_context_manager() as session,
-            with_session(session=session),
-        ):
-            git_url = await safe_prepare_git_url(session=session, role=role)
-            ssh_cmd = None
-            if git_url:
-                ssh_cmd = await get_ssh_command(
-                    git_url=git_url, session=session, role=role
+        rv_alias = aliased(RegistryVersion)
+        statement = (
+            select(
+                RegistryRepository.origin,
+                rv_alias.version,
+                rv_alias.tarball_uri,
+            )
+            .join(subq, RegistryRepository.id == subq.c.repository_id)
+            .join(
+                rv_alias,
+                (rv_alias.repository_id == subq.c.repository_id)
+                & (rv_alias.created_at == subq.c.max_created_at),
+            )
+            .where(
+                RegistryRepository.organization_id == config.TRACECAT__DEFAULT_ORG_ID
+            )
+        )
+        result = await session.execute(statement)
+        artifacts = [
+            RegistryArtifactsContext(
+                origin=str(origin),
+                version=str(version),
+                tarball_uri=str(tarball_uri),
+            )
+            for origin, version, tarball_uri in result.all()
+            if tarball_uri is not None
+        ]
+
+    logger.info(
+        "Fetched registry artifacts and updating cache",
+        count=len(artifacts),
+        cache_key=cache_key,
+    )
+    _registry_artifacts_cache[cache_key] = (time.time() + 60, artifacts)
+    return artifacts
+
+
+async def get_registry_artifacts_for_lock(
+    registry_lock: dict[str, str],
+) -> list[RegistryArtifactsContext]:
+    """Get registry tarball URIs for specific locked versions.
+
+    Args:
+        registry_lock: Maps origin -> version string.
+            Example: {"tracecat_registry": "2024.12.10.123456", "git+ssh://...": "abc1234"}
+
+    Returns:
+        List of RegistryArtifactsContext for the locked versions.
+    """
+    if not registry_lock:
+        return []
+
+    async with (
+        get_async_session_context_manager() as session,
+        with_session(session=session),
+    ):
+        artifacts: list[RegistryArtifactsContext] = []
+
+        for origin, version in registry_lock.items():
+            # Query for the specific version
+            statement = (
+                select(
+                    RegistryRepository.origin,
+                    RegistryVersion.version,
+                    RegistryVersion.tarball_uri,
+                )
+                .join(
+                    RegistryVersion,
+                    RegistryVersion.repository_id == RegistryRepository.id,
+                )
+                .where(
+                    RegistryRepository.origin == origin,
+                    RegistryVersion.version == version,
+                    RegistryRepository.organization_id
+                    == config.TRACECAT__DEFAULT_ORG_ID,
+                )
+            )
+            result = await session.execute(statement)
+            row = result.first()
+
+            if row and row[2] is not None:
+                # Only include if tarball_uri exists (required after migration)
+                artifacts.append(
+                    RegistryArtifactsContext(
+                        origin=str(row[0]),
+                        version=str(row[1]),
+                        tarball_uri=str(row[2]),
+                    )
+                )
+            elif row:
+                logger.warning(
+                    "Registry version found but missing tarball_uri",
+                    origin=origin,
+                    version=version,
+                )
+            else:
+                logger.warning(
+                    "Registry version not found for lock entry",
+                    origin=origin,
+                    version=version,
                 )
 
-        # Cache for 60 seconds
-        _git_context_cache[cache_key] = (time.time() + 60, git_url, ssh_cmd)
-        logger.debug(
-            "Cached git context",
-            workspace_id=role.workspace_id,
-            has_git_url=bool(git_url),
-        )
-        return git_url, ssh_cmd
-
-
-def sync_executor_entrypoint(input: RunActionInput, role: Role) -> ExecutionResult:
-    """We run this on the ray cluster."""
-
-    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    loop = uvloop.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    logger.info("Running action in sync entrypoint", action=input.task.action)
-
-    async_engine = get_async_engine()
-    try:
-        coro = run_action_from_input(input=input, role=role)
-        result = loop.run_until_complete(coro)
-        # Use serialize_unknown=True for additional safety
-        return to_jsonable_python(result, serialize_unknown=True)
-    except Exception as e:
-        # Raise the error proxy here
-        logger.info(
-            "Error running action, raising error proxy",
-            error=e,
-            type=type(e).__name__,
-            traceback=traceback.format_exc(),
-        )
-        return ExecutorActionErrorInfo.from_exc(e, input.task.action)
-    finally:
-        loop.run_until_complete(async_engine.dispose())
-        loop.close()  # We always close the loop
+    return artifacts
 
 
 async def _run_action_direct(*, action: BoundRegistryAction, args: ArgsT) -> Any:
@@ -270,25 +341,335 @@ async def run_template_action(
     )
 
 
-async def run_action_from_input(input: RunActionInput, role: Role) -> Any:
-    """Main entrypoint for running an action."""
-    ctx_role.set(role)
-    ctx_run.set(input.run_context)
-    ctx_session_id.set(input.session_id)
-    # The interaction context was generated by the worker
-    if input.interaction_context is not None:
-        ctx_interaction.set(input.interaction_context)
-    log = ctx_logger.get(logger.bind(ref=input.task.ref))
+async def _prepare_step_context(
+    step_action: str,
+    evaluated_args: dict[str, Any],
+    parent_resolved: ResolvedContext,
+    input: RunActionInput,
+    role: Role,
+) -> ResolvedContext:
+    """Prepare ResolvedContext for a template step, reusing parent secrets.
 
+    This avoids re-fetching secrets for each step - they're already available
+    from the parent template's prepare_resolved_context() call which fetches
+    all secrets recursively.
+    """
+    # Only fetch action impl (lightweight - no secret fetching)
+    async with RegistryActionsService.with_session() as service:
+        reg_action = await service.get_action(step_action)
+
+    impl = RegistryActionImplValidator.validate_python(reg_action.implementation)
+    if impl.type == "template":
+        action_impl = ActionImplementation(
+            type="template",
+            action_name=step_action,
+            template_definition=impl.template_action.definition.model_dump(mode="json"),
+            origin=reg_action.origin,
+        )
+    else:
+        action_impl = ActionImplementation(
+            type="udf",
+            action_name=step_action,
+            module=impl.module,
+            name=impl.name,
+            origin=impl.url,
+        )
+
+    # Mint new executor token for step (required for SDK authentication)
+    if role.workspace_id is None:
+        raise ValueError("workspace_id is required for template step execution")
+    executor_token = mint_executor_token(
+        workspace_id=role.workspace_id,
+        user_id=role.user_id,
+        wf_id=str(input.run_context.wf_id),
+        wf_exec_id=str(input.run_context.wf_run_id),
+    )
+
+    # Reuse parent secrets/variables, use pre-evaluated args
+    return ResolvedContext(
+        secrets=parent_resolved.secrets,  # Reuse - already fetched recursively
+        variables=parent_resolved.variables,  # Reuse
+        action_impl=action_impl,
+        evaluated_args=evaluated_args,  # Already evaluated against template context
+        workspace_id=parent_resolved.workspace_id,
+        workflow_id=parent_resolved.workflow_id,
+        run_id=parent_resolved.run_id,
+        executor_token=executor_token,  # Mint new token for step
+        logical_time=parent_resolved.logical_time,
+    )
+
+
+async def _execute_template_action(
+    backend: ExecutorBackend,
+    input: RunActionInput,
+    ctx: DispatchActionContext,
+    resolved_context: ResolvedContext,
+    timeout: float,
+) -> Any:
+    """Execute a template action by orchestrating its steps.
+
+    This function handles template execution at the service layer, allowing
+    template actions to work with any backend (including sandboxed backends).
+
+    Each step becomes a separate backend.execute() call with its own ResolvedContext.
+    Secrets are reused from the parent context (already fetched recursively).
+
+    Args:
+        backend: The executor backend to use for step execution
+        input: The original RunActionInput
+        ctx: Dispatch context containing the role
+        resolved_context: Pre-resolved context with secrets and template definition
+        timeout: Execution timeout
+
+    Returns:
+        The evaluated returns expression result
+    """
+    role = ctx.role
+
+    # Parse template definition from resolved context
+    template_def_dict = resolved_context.action_impl.template_definition
+    if not template_def_dict:
+        raise ValueError("Template action missing template_definition")
+
+    template_def = TemplateActionDefinition.model_validate(template_def_dict)
+
+    # Build template context for expression evaluation
+    # Secrets context uses the pre-resolved secrets from parent
+    secrets_context = resolved_context.secrets
+    env_context = input.exec_context.get(ExprContext.ENV, {})
+    vars_context = resolved_context.variables
+
+    # The evaluated_args are the template's input arguments
+    validated_input_args = resolved_context.evaluated_args
+
+    template_context = cast(
+        ExecutionContext,
+        {
+            ExprContext.SECRETS: secrets_context,
+            ExprContext.ENV: env_context,
+            ExprContext.VARS: vars_context,
+            ExprContext.TEMPLATE_ACTION_INPUTS: validated_input_args,
+            ExprContext.TEMPLATE_ACTION_STEPS: {},
+        },
+    )
+
+    logger.info(
+        "Executing template action via backend",
+        action=template_def.action,
+        steps=len(template_def.steps),
+    )
+
+    # Execute each step
+    for step in template_def.steps:
+        logger.trace(
+            "Executing template step",
+            step_ref=step.ref,
+            step_action=step.action,
+        )
+
+        # Evaluate step args with template context
+        evaled_args = cast(
+            dict[str, Any],
+            eval_templated_object(
+                step.args, operand=cast(ExprOperand, template_context)
+            ),
+        )
+
+        # Prepare step context (reuses parent secrets, no re-fetch)
+        step_resolved = await _prepare_step_context(
+            step_action=step.action,
+            evaluated_args=evaled_args,
+            parent_resolved=resolved_context,
+            input=input,
+            role=role,
+        )
+
+        # Execute step via _invoke_step (handles nested templates)
+        try:
+            step_result = await _invoke_step(
+                backend=backend,
+                resolved_context=step_resolved,
+                input=input,
+                ctx=ctx,
+                timeout=timeout,
+            )
+        except ExecutionError:
+            # Re-raise with step context preserved
+            raise
+        except Exception as e:
+            # Wrap other exceptions
+            logger.error(
+                "Template step failed",
+                step_ref=step.ref,
+                step_action=step.action,
+                error=str(e),
+            )
+            raise ExecutionError(
+                info=ExecutorActionErrorInfo.from_exc(e, action_name=step.action)
+            ) from e
+
+        # Store step result for subsequent steps
+        template_context[ExprContext.TEMPLATE_ACTION_STEPS][step.ref] = TaskResult(
+            result=step_result,
+            result_typename=type(step_result).__name__,
+        )
+        logger.trace("Template step completed", step_ref=step.ref)
+
+    # Evaluate returns expression with final template context
+    return eval_templated_object(
+        template_def.returns, operand=cast(ExprOperand, template_context)
+    )
+
+
+async def _invoke_step(
+    backend: ExecutorBackend,
+    resolved_context: ResolvedContext,
+    input: RunActionInput,
+    ctx: DispatchActionContext,
+    timeout: float,
+) -> Any:
+    """Execute a template step. Skips masking (done at root level).
+
+    This function handles both UDF and nested template actions.
+    For templates, it recurses into _execute_template_action.
+    For UDFs, it delegates to the backend.
+
+    Args:
+        backend: The executor backend to use
+        resolved_context: Pre-resolved context for the step
+        input: The original RunActionInput
+        ctx: Dispatch context containing the role
+        timeout: Execution timeout
+
+    Returns:
+        The step execution result (unmasked)
+    """
+    match resolved_context.action_impl.type:
+        case "template":
+            # Nested template - recurse
+            return await _execute_template_action(
+                backend=backend,
+                input=input,
+                ctx=ctx,
+                resolved_context=resolved_context,
+                timeout=timeout,
+            )
+        case "udf":
+            # Leaf node - execute via backend
+            result = await backend.execute(
+                input=input,
+                role=ctx.role,
+                resolved_context=resolved_context,
+                timeout=timeout,
+            )
+            if isinstance(result, ExecutorResultSuccess):
+                return result.result
+            else:
+                # Error response from backend
+                error_data = result.error
+                exec_result = ExecutorActionErrorInfo.model_validate(error_data)
+                raise ExecutionError(info=exec_result)
+        case _:
+            raise ValueError(
+                f"Unknown action type: {resolved_context.action_impl.type}"
+            )
+
+
+async def _get_registry_pythonpath(input: RunActionInput, role: Role) -> str | None:
+    """Get the PYTHONPATH for the current registry version.
+
+    Uses the same logic as run_action_in_subprocess to get artifacts.
+    Returns a colon-separated path including all registry tarballs.
+    """
+    if config.TRACECAT__LOCAL_REPOSITORY_ENABLED:
+        return None
+
+    # Get artifacts from registry (S3 wheelhouse/tarball)
+    tarball_uris: list[str] = []
+    try:
+        if input.registry_lock:
+            logger.debug(
+                "Resolving registry artifacts from lock",
+                registry_lock=input.registry_lock,
+            )
+            artifacts = await get_registry_artifacts_for_lock(input.registry_lock)
+        else:
+            artifacts = await get_registry_artifacts_cached(role)
+
+        for artifact in artifacts:
+            if artifact.tarball_uri:
+                tarball_uris.append(artifact.tarball_uri)
+    except Exception as e:
+        logger.warning("Failed to load registry artifacts metadata", error=str(e))
+        return None
+
+    if not tarball_uris:
+        return None
+
+    # Use ActionRunner to ensure all registry environments are set up
+    runner = get_action_runner()
+    paths: list[str] = []
+    for tarball_uri in tarball_uris:
+        target_dir = await runner.ensure_registry_environment(tarball_uri=tarball_uri)
+        if target_dir:
+            paths.append(str(target_dir))
+
+    return ":".join(paths) if paths else None
+
+
+@dataclass
+class PreparedContext:
+    """Context prepared for execution, including resolved secrets and masking info."""
+
+    resolved_context: ResolvedContext
+    mask_values: set[str] | None
+
+
+async def prepare_resolved_context(
+    input: RunActionInput,
+    role: Role,
+) -> PreparedContext:
+    """Prepare all context needed for action execution.
+
+    This resolves secrets, variables, action implementation, and evaluated args
+    once at the service layer. The resulting ResolvedContext is passed to backends
+    for execution without requiring DB access in the sandbox.
+
+    Returns:
+        PreparedContext containing ResolvedContext and mask_values for post-processing.
+    """
     task = input.task
     action_name = task.action
 
+    # Get action implementation from DB without importing modules
     async with RegistryActionsService.with_session() as service:
         reg_action = await service.get_action(action_name)
         action_secrets = await service.fetch_all_action_secrets(reg_action)
-        action = service.get_bound(reg_action, mode="execution")
+        # NOTE: We don't call get_bound() here to avoid importing the module
+        # before tarball paths are added to sys.path (which happens in the backend)
 
+    # Build action implementation metadata directly from JSONB
+    impl = RegistryActionImplValidator.validate_python(reg_action.implementation)
+    if impl.type == "template":
+        action_impl = ActionImplementation(
+            type="template",
+            action_name=action_name,
+            template_definition=impl.template_action.definition.model_dump(mode="json"),
+            origin=reg_action.origin,
+        )
+    else:
+        action_impl = ActionImplementation(
+            type="udf",
+            action_name=action_name,
+            module=impl.module,
+            name=impl.name,
+            origin=impl.url,
+        )
+
+    # Collect expressions to know what secrets/variables are needed
     collected = collect_expressions(task.args)
+
+    # Fetch secrets and variables
     secrets = await secrets_manager.get_action_secrets(
         secret_exprs=collected.secrets, action_secrets=action_secrets
     )
@@ -297,181 +678,183 @@ async def run_action_from_input(input: RunActionInput, role: Role) -> Any:
         environment=input.run_context.environment,
         role=role,
     )
+
+    # Build mask values for secret masking
     if config.TRACECAT__UNSAFE_DISABLE_SM_MASKING:
-        log.warning(
+        logger.warning(
             "Secrets masking is disabled. This is unsafe in production workflows."
         )
         mask_values = None
     else:
-        # Safety: Extract complete secret values for masking, not individual characters
         mask_values = set()
         for _, secret_value in traverse_leaves(secrets):
-            # Convert non-string values to strings for masking
             if secret_value is not None:
                 secret_str = str(secret_value)
-                # Only mask non-empty string values that are longer than 1 character
-                # to avoid masking individual characters that might appear in regular text
                 if len(secret_str) > 1:
                     mask_values.add(secret_str)
-                # Also mask the original value if it's already a string
                 if isinstance(secret_value, str) and len(secret_value) > 1:
                     mask_values.add(secret_value)
 
-    # When we're here, we've populated the task arguments with shared context values
-
-    # Note: Do not log task.args here as it may contain templated secrets
-    log.info(
-        "Run action",
-        task_ref=task.ref,
-        action_name=action_name,
-        # Removed args=task.args to prevent secret leakage
-    )
-
+    # Build execution context for SDK calls
     context = input.exec_context.copy()
     context[ExprContext.SECRETS] = secrets
     context[ExprContext.VARS] = workspace_variables
 
-    flattened_secrets = secrets_manager.flatten_secrets(secrets)
-    with secrets_manager.env_sandbox(flattened_secrets):
-        args = evaluate_templated_args(task, context)
-        result = await run_single_action(action=action, args=args, context=context)
-
-    if mask_values:
-        result = apply_masks_object(result, masks=mask_values)
-
-    log.trace("Result", result=result)
-    return result
-
-
-@ray.remote
-def run_action_task(input: RunActionInput, role: Role) -> ExecutionResult:
-    """Ray task that runs an action."""
-    return sync_executor_entrypoint(input, role)
-
-
-async def run_action_on_ray_cluster(
-    input: RunActionInput, ctx: DispatchActionContext, iteration: int | None = None
-) -> ExecutionResult:
-    """Run an action on the ray cluster.
-
-    If any exceptions are thrown here, they're platform level errors.
-    All application/user level errors are caught by the executor and returned as values.
-    """
-    # Initialize runtime environment variables
-    env_vars = {"GIT_SSH_COMMAND": ctx.ssh_command} if ctx.ssh_command else {}
-    # Override UV_SYSTEM_PYTHON to allow uv to respect Ray's virtual environment
-    # The global UV_SYSTEM_PYTHON=1 in Dockerfile forces system Python usage,
-    # but Ray creates its own virtual environment and expects uv to use it
-    env_vars["UV_SYSTEM_PYTHON"] = "false"
-    additional_vars: dict[str, Any] = {}
-
-    # Add git URL to pip dependencies if SHA is present
-    pip_deps = []
-    if ctx.git_url and ctx.git_url.ref:
-        try:
-            url = ctx.git_url.to_url()
-            pip_deps.append(url)
-            logger.trace("Adding git URL to runtime env", git_url=ctx.git_url, url=url)
-        except Exception as e:
-            logger.error("Error adding git URL to runtime env", error=e)
-
-    # If we have a local registry, we need to add it to the runtime env
-    if config.TRACECAT__LOCAL_REPOSITORY_ENABLED:
-        local_repo_path = config.TRACECAT__LOCAL_REPOSITORY_CONTAINER_PATH
-        logger.info(
-            "Adding local repository and required dependencies to runtime env",
-            local_repo_path=local_repo_path,
-        )
-
-        # Try pyproject.toml first
-        pyproject_path = Path(local_repo_path) / "pyproject.toml"
-        if not pyproject_path.exists():
-            logger.error(
-                "No pyproject.toml found in local repository", path=pyproject_path
-            )
-            raise ValueError("No pyproject.toml found in local repository")
-        required_deps = await asyncio.to_thread(
-            get_pyproject_toml_required_deps, pyproject_path
-        )
-        logger.debug(
-            "Found pyproject.toml with required dependencies", deps=required_deps
-        )
-        pip_deps.extend([local_repo_path, *required_deps])
-
-    # Add pip dependencies to runtime env using uv
-    if pip_deps:
-        additional_vars["uv"] = pip_deps
-
-    runtime_env = RuntimeEnv(env_vars=env_vars, **additional_vars)
-
-    logger.trace("Running action on ray cluster", runtime_env=runtime_env)
-    obj_ref = run_action_task.options(runtime_env=runtime_env).remote(input, ctx.role)
+    # Extract and set logical_time BEFORE evaluating args
+    # This ensures FN.now(), FN.utcnow(), FN.today() use the deterministic time
+    env_context = context.get(ExprContext.ENV) or {}
+    workflow_context = env_context.get("workflow") or {}
+    logical_time = workflow_context.get("logical_time")
+    logger.trace(
+        "Extracting logical_time from context",
+        task_ref=task.ref,
+        logical_time_raw=logical_time,
+    )
+    if logical_time is not None and isinstance(logical_time, str):
+        # logical_time may be serialized as ISO string through Temporal
+        logical_time = datetime.fromisoformat(logical_time)
+    logical_time_token = ctx_logical_time.set(logical_time)
+    # Set interaction context for FN.get_interaction() during args evaluation
+    interaction_token = ctx_interaction.set(input.interaction_context)
     try:
-        coro = asyncio.to_thread(ray.get, obj_ref)
-        exec_result = await asyncio.wait_for(
-            coro, timeout=config.TRACECAT__EXECUTOR_CLIENT_TIMEOUT
+        logger.trace(
+            "Context set before template evaluation",
+            task_ref=task.ref,
+            logical_time=logical_time,
+            has_interaction=input.interaction_context is not None,
         )
-    except TimeoutError as e:
-        logger.error("Action timed out, cancelling task", error=e)
-        ray.cancel(obj_ref, force=True)
-        raise e
-    except RayTaskError as e:
-        logger.error("Error running action on ray cluster", error=e)
-        if isinstance(e.cause, BaseException):
-            raise e.cause from None
-        raise e
 
-    # Here, we have some result or error.
-    # Reconstruct the error and raise some kind of proxy
-    if isinstance(exec_result, ExecutorActionErrorInfo):
-        logger.trace("Raising executor error proxy", exec_result=exec_result)
+        # Evaluate templated args (now with logical_time and interaction context set)
+        evaluated_args = evaluate_templated_args(task, context)
+    finally:
+        ctx_logical_time.reset(logical_time_token)
+        ctx_interaction.reset(interaction_token)
+
+    if role.workspace_id is None:
+        raise ValueError("workspace_id is required for action execution")
+
+    # Generate executor token for SDK authentication
+    executor_token = mint_executor_token(
+        workspace_id=role.workspace_id,
+        user_id=role.user_id,
+        wf_id=str(input.run_context.wf_id),
+        wf_exec_id=str(input.run_context.wf_run_id),
+    )
+
+    resolved_context = ResolvedContext(
+        secrets=secrets,
+        variables=workspace_variables,
+        action_impl=action_impl,
+        evaluated_args=dict(evaluated_args),
+        workspace_id=str(role.workspace_id),
+        workflow_id=str(input.run_context.wf_id),
+        run_id=str(input.run_context.wf_run_id),
+        executor_token=executor_token,
+        logical_time=logical_time,
+    )
+
+    return PreparedContext(resolved_context=resolved_context, mask_values=mask_values)
+
+
+async def invoke_once(
+    backend: ExecutorBackend,
+    input: RunActionInput,
+    ctx: DispatchActionContext,
+    iteration: int | None = None,
+) -> ExecutionResult:
+    """Execute action using the configured backend.
+
+    The backend is selected via TRACECAT__EXECUTOR_BACKEND config:
+    - 'pool': Warm nsjail workers (single-tenant, high throughput)
+    - 'ephemeral': Cold nsjail subprocess per action (multitenant, full isolation)
+    - 'direct': In-process execution (development only)
+    - 'auto': Auto-select based on environment
+    """
+    role = ctx.role
+    action_name = input.task.action
+    timeout = config.TRACECAT__EXECUTOR_CLIENT_TIMEOUT
+
+    # Ensure registry environment is set up (for tarball extraction)
+    await _get_registry_pythonpath(input, role)
+
+    try:
+        # Prepare resolved context (secrets, variables, action impl, evaluated args)
+        # This is done once here and passed to all backends
+        # For templates, secrets are fetched recursively for all steps
+        prepared = await prepare_resolved_context(input, role)
+        resolved_context = prepared.resolved_context
+        mask_values = prepared.mask_values
+
+        # Set logical_time for deterministic FN.now() (applies to in-process backends)
+        # Sandboxed backends set this in their subprocess from resolved_context.logical_time
+        ctx_logical_time.set(resolved_context.logical_time)
+
+        # Delegate execution to _invoke_step (shared logic for template/udf)
+        # This handles both template orchestration and UDF execution
+        action_result = await _invoke_step(
+            backend=backend,
+            resolved_context=resolved_context,
+            input=input,
+            ctx=ctx,
+            timeout=timeout,
+        )
+
+    except ExecutionError as e:
+        # ExecutionError already has proper error info, just add loop context if needed
+        if iteration is not None and e.info is not None:
+            e.info.loop_iteration = iteration
+            e.info.loop_vars = input.exec_context.get(ExprContext.LOCAL_VARS)
+        raise
+    except Exception as e:
+        # Infrastructure errors need to be wrapped for consistent error handling
+        logger.error(
+            "Backend execution failed",
+            action=action_name,
+            error=str(e),
+            error_type=type(e).__name__,
+            backend=type(backend).__name__,
+        )
+        exec_result = ExecutorActionErrorInfo.from_exc(e, action_name=action_name)
         if iteration is not None:
             exec_result.loop_iteration = iteration
-            exec_result.loop_vars = input.exec_context[ExprContext.LOCAL_VARS]
-        raise ExecutionError(info=exec_result)
-    return exec_result
+            exec_result.loop_vars = input.exec_context.get(ExprContext.LOCAL_VARS)
+        raise ExecutionError(info=exec_result) from e
+
+    # Apply secret masking at root level only
+    # Steps don't mask - masking happens once here after all execution completes
+    if mask_values:
+        action_result = apply_masks_object(action_result, masks=mask_values)
+    return action_result
 
 
-async def dispatch_action_on_cluster(input: RunActionInput) -> Any:
-    """Schedule actions on the ray cluster.
+async def dispatch_action(backend: ExecutorBackend, input: RunActionInput) -> Any:
+    """Dispatch action for execution.
 
-    This function handles dispatching actions to be executed on a Ray cluster. It supports
+    This function handles dispatching actions to be executed. It supports
     both single action execution and parallel execution using for_each loops.
+
+    Called by:
+    - ExecutorActivities.execute_action_activity (Temporal activity on shared-action-queue)
 
     Args:
         input: The RunActionInput containing the task definition and execution context
-        role: The Role used for authorization
-        git_url: The Git URL to use for the action
+
     Returns:
         Any: For single actions, returns the ExecutionResult. For for_each loops, returns
              a list of results from all parallel executions.
 
     Raises:
         TracecatException: If there are errors evaluating for_each expressions or during execution
-        ExecutorErrorWrapper: If there are errors from the executor itself
+        ExecutionError: If there are errors from the executor itself
+        LoopExecutionError: If there are errors in for_each loop execution
     """
-
     role = ctx_role.get()
     ctx = DispatchActionContext(role=role)
-
-    # Use cached git context to avoid opening DB sessions unnecessarily
-    git_url, ssh_cmd = await get_git_context_cached(role=role)
-    if git_url:
-        ctx.git_url = git_url
-        ctx.ssh_command = ssh_cmd
-
-    return await _dispatch_action(input=input, ctx=ctx)
-
-
-async def _dispatch_action(
-    input: RunActionInput,
-    ctx: DispatchActionContext,
-) -> Any:
     task = input.task
     logger.info("Preparing runtime environment", ctx=ctx)
     # If there's no for_each, execute normally
     if not task.for_each:
-        return await run_action_on_ray_cluster(input, ctx)
+        return await invoke_once(backend, input, ctx)
 
     logger.info("Running for_each on action in parallel", action=task.action)
 
@@ -480,9 +863,6 @@ async def _dispatch_action(
     # We have a list of iterators that give a variable assignment path ".path.to.value"
     # and a collection of values as a tuple.
     iterators = get_iterables_from_expression(expr=task.for_each, operand=base_context)
-
-    async def iteration(patched_input: RunActionInput, i: int):
-        return await run_action_on_ray_cluster(patched_input, ctx, iteration=i)
 
     tasks: list[asyncio.Task[ExecutionResult]] = []
     try:
@@ -500,7 +880,7 @@ async def _dispatch_action(
                     )
                 # Create a new task with the patched context
                 new_input = input.model_copy(update={"exec_context": new_context})
-                coro = iteration(new_input, i)
+                coro = invoke_once(backend, new_input, ctx, iteration=i)
                 tasks.append(tg.create_task(coro))
         return tg.results()
     except* ExecutionError as eg:

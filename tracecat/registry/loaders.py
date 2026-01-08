@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import sys
 from collections.abc import Callable
 from typing import Any, Literal, NoReturn
 
@@ -12,8 +13,8 @@ from tracecat.db.models import RegistryAction
 from tracecat.expressions.expectations import create_expectation_model
 from tracecat.expressions.validation import TemplateValidator
 from tracecat.logger import logger
+from tracecat.registry.actions.bound import BoundRegistryAction
 from tracecat.registry.actions.schemas import (
-    BoundRegistryAction,
     RegistryActionImplValidator,
     RegistryActionUDFImpl,
 )
@@ -117,14 +118,14 @@ def load_udf_impl(impl: RegistryActionUDFImpl) -> F:
             mod = importlib.import_module(module_path)
         except ModuleNotFoundError as e:
             # Defensive fallback: if a concurrent reload temporarily disrupted imports,
-            # safely reload the target module and retry.
+            # avoid a reload if the module is already present.
             if module_path.startswith("tracecat_registry"):
                 logger.warning(
                     "Recovering from module import error; attempting safe reload",
                     module=module_path,
                     error=str(e),
                 )
-                mod = import_and_reload(module_path)
+                mod = sys.modules.get(module_path) or import_and_reload(module_path)
             else:
                 raise
     try:

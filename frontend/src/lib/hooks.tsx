@@ -94,6 +94,9 @@ import {
   foldersUpdateFolder,
   type GitCommitInfo,
   type GitSettingsRead,
+  type GraphOperation,
+  graphApplyGraphOperations,
+  graphGetGraph,
   type IntegrationRead,
   type IntegrationReadMinimal,
   type IntegrationUpdate,
@@ -159,6 +162,7 @@ import {
   type SchedulesDeleteScheduleData,
   type SchedulesUpdateScheduleData,
   type SecretCreate,
+  type SecretDefinition,
   type SecretReadMinimal,
   type SecretUpdate,
   type SessionRead,
@@ -175,6 +179,7 @@ import {
   schedulesUpdateSchedule,
   secretsCreateSecret,
   secretsDeleteSecretById,
+  secretsListSecretDefinitions,
   secretsListSecrets,
   secretsUpdateSecretById,
   settingsGetAgentSettings,
@@ -264,6 +269,7 @@ import {
   type WorkflowsRemoveTagData,
   type WorkspaceCreate,
   type WorkspaceUpdate,
+  workflowExecutionsCreateDraftWorkflowExecution,
   workflowExecutionsCreateWorkflowExecution,
   workflowExecutionsGetWorkflowExecution,
   workflowExecutionsGetWorkflowExecutionCompact,
@@ -396,6 +402,69 @@ export function useDeleteAction() {
     },
   })
   return { deleteAction }
+}
+
+type GraphOpParams = {
+  baseVersion: number
+  operations: GraphOperation[]
+}
+
+/**
+ * Hook to fetch graph data for a workflow.
+ */
+export function useGraph(workspaceId: string, workflowId: string) {
+  const query = useQuery({
+    queryKey: ["graph", workspaceId, workflowId],
+    queryFn: async () => {
+      const graph = await graphGetGraph({ workspaceId, workflowId })
+      return graph
+    },
+    enabled: Boolean(workflowId),
+  })
+
+  return query
+}
+
+/**
+ * Hook to apply graph operations with optimistic concurrency.
+ * Returns the updated graph on success, allowing the canvas to update state.
+ */
+export function useGraphOperations(workspaceId: string, workflowId: string) {
+  const queryClient = useQueryClient()
+
+  const mutation = useMutation({
+    mutationFn: async ({ baseVersion, operations }: GraphOpParams) =>
+      await graphApplyGraphOperations({
+        workspaceId,
+        workflowId,
+        requestBody: {
+          base_version: baseVersion,
+          operations,
+        },
+      }),
+    onSuccess: (graph) => {
+      // Update the graph cache with the new version
+      queryClient.setQueryData(["graph", workspaceId, workflowId], graph)
+      // Also invalidate workflow to pick up any action changes
+      queryClient.invalidateQueries({ queryKey: ["workflow", workflowId] })
+    },
+    onError: (error) => {
+      console.error("Failed to apply graph operations:", error)
+    },
+  })
+
+  // Helper to refetch graph on 409 conflict
+  const refetchGraph = useCallback(async () => {
+    const graph = await graphGetGraph({ workspaceId, workflowId })
+    queryClient.setQueryData(["graph", workspaceId, workflowId], graph)
+    return graph
+  }, [workspaceId, workflowId, queryClient])
+
+  return {
+    applyGraphOperations: mutation.mutateAsync,
+    isPending: mutation.isPending,
+    refetchGraph,
+  }
 }
 
 export function useUpdateWebhook(workspaceId: string, workflowId: string) {
@@ -936,6 +1005,66 @@ export function useCreateManualWorkflowExecution(workflowId: string) {
   }
 }
 
+export function useCreateDraftWorkflowExecution(workflowId: string) {
+  const queryClient = useQueryClient()
+  const workspaceId = useWorkspaceId()
+
+  const {
+    mutateAsync: createDraftExecution,
+    isPending: createDraftExecutionIsPending,
+    error: createDraftExecutionError,
+  } = useMutation({
+    mutationFn: async (params: WorkflowExecutionCreate) => {
+      return await workflowExecutionsCreateDraftWorkflowExecution({
+        workspaceId,
+        requestBody: params,
+      })
+    },
+    onSuccess: async ({ wf_exec_id, message }) => {
+      toast({
+        title: `Draft workflow run started`,
+        description: `${wf_exec_id} ${message}`,
+      })
+
+      // Still invalidate queries for compatibility with other components
+      await queryClient.refetchQueries({
+        queryKey: ["last-manual-execution"],
+      })
+      await queryClient.refetchQueries({
+        queryKey: ["last-manual-execution", workflowId],
+      })
+      await queryClient.refetchQueries({
+        queryKey: ["compact-workflow-execution"],
+      })
+      await queryClient.refetchQueries({
+        queryKey: ["compact-workflow-execution", wf_exec_id],
+      })
+    },
+    onError: (error: TracecatApiError<Record<string, string>>) => {
+      switch (error.status) {
+        case 400:
+          console.error("Workflow validation failed", error)
+          return toast({
+            title: "Workflow validation failed with 1 error",
+            description: "Please hover over the run button to view errors.",
+          })
+        default:
+          console.error("Unexpected error starting draft workflow", error)
+          return toast({
+            title: "Unexpected error starting draft workflow",
+            description: "Please check the run logs for more information",
+          })
+      }
+    },
+  })
+
+  return {
+    createDraftExecution,
+    createDraftExecutionIsPending,
+    createDraftExecutionError,
+  }
+}
+
 export function useLastExecution({
   workflowId,
   triggerTypes,
@@ -1073,7 +1202,7 @@ export function useWorkspaceSecrets(workspaceId: string) {
     queryFn: async () =>
       await secretsListSecrets({
         workspaceId,
-        type: ["custom"],
+        type: ["custom", "ssh-key", "mtls", "ca-cert"],
       }),
     enabled: !!workspaceId,
   })
@@ -1111,7 +1240,8 @@ export function useWorkspaceSecrets(workspaceId: string) {
           console.error("Failed to create secret", error)
           return toast({
             title: "Failed to add new secret",
-            description: "Please contact support for help.",
+            description:
+              "Check that your secret is correctly formatted and try again.",
           })
       }
     },
@@ -1194,6 +1324,24 @@ export function useWorkspaceSecrets(workspaceId: string) {
     createSecret,
     updateSecretById,
     deleteSecretById,
+  }
+}
+
+export function useSecretDefinitions(workspaceId: string) {
+  const {
+    data: secretDefinitions,
+    isLoading: secretDefinitionsIsLoading,
+    error: secretDefinitionsError,
+  } = useQuery<SecretDefinition[], ApiError>({
+    queryKey: ["secret-definitions", workspaceId],
+    queryFn: async () => await secretsListSecretDefinitions({ workspaceId }),
+    enabled: !!workspaceId,
+  })
+
+  return {
+    secretDefinitions,
+    secretDefinitionsIsLoading,
+    secretDefinitionsError,
   }
 }
 

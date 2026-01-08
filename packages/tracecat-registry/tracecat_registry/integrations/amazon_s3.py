@@ -1,24 +1,29 @@
 """S3 integration to download files and return contents as a string."""
 
-import re
-from typing import Annotated, Any
-from typing_extensions import Doc
+import asyncio
 import base64
 import binascii
-import asyncio
+import re
+from typing import TYPE_CHECKING, Annotated, Any
 
 from tenacity import retry, stop_after_attempt, wait_exponential
-from types_aiobotocore_s3.type_defs import (
-    ListObjectsV2OutputTypeDef,
-    DeleteObjectOutputTypeDef,
-)
+from typing_extensions import Doc
+
+if TYPE_CHECKING:
+    from types_aiobotocore_s3.type_defs import (
+        DeleteObjectOutputTypeDef,
+        ListObjectsV2OutputTypeDef,
+    )
+else:
+    ListObjectsV2OutputTypeDef = dict[str, Any]
+    DeleteObjectOutputTypeDef = dict[str, Any]
 
 from tracecat_registry import RegistrySecret, registry
-import tracecat_registry.integrations.aws_boto3 as aws_boto3
-from tracecat.config import (
+from tracecat_registry.config import (
     TRACECAT__MAX_FILE_SIZE_BYTES,
     TRACECAT__S3_CONCURRENCY_LIMIT,
 )
+import tracecat_registry.integrations.aws_boto3 as aws_boto3
 
 # Add this at the top with other constants
 BUCKET_REGEX = re.compile(r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$")
