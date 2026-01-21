@@ -62,6 +62,41 @@ ArgsClsT = type[BaseModel]
 type F = Callable[..., Any]
 
 
+def get_custom_registry_target() -> Path:
+    """Get the target directory for installing custom registry packages.
+
+    This directory is used to isolate custom registry dependencies from the
+    main tracecat virtual environment, preventing dependency conflicts.
+    The directory is automatically added to sys.path so imports work.
+
+    Returns:
+        Path to the target directory for custom registry packages.
+    """
+    # Use PYTHONUSERBASE if set (production), otherwise ~/.local
+    base = os.getenv("PYTHONUSERBASE") or Path.home().joinpath(".local").as_posix()
+    return Path(base)
+
+
+def ensure_custom_registry_path() -> None:
+    """Ensure the custom registry target directory is in sys.path.
+
+    This must be called before importing any custom registry modules to ensure
+    packages installed via --target are discoverable.
+
+    Uses site.addsitedir() instead of sys.path.insert() to properly process
+    .pth files from editable installs (uv pip install --editable).
+    """
+    import site
+
+    target = get_custom_registry_target()
+    target_str = str(target)
+    if target_str not in sys.path:
+        # Use addsitedir to process .pth files from editable installs
+        # This is required for local registries installed with --editable
+        site.addsitedir(target_str)
+        logger.debug("Added custom registry path via site.addsitedir", path=target_str)
+
+
 def iter_valid_files(
     base_path: Path | str,
     file_extensions: tuple[str, ...] = (".py",),
@@ -174,10 +209,16 @@ class Repository:
     3. Serve function execution requests from a registry manager
     """
 
-    def __init__(self, origin: str = DEFAULT_REGISTRY_ORIGIN, role: Role | None = None):
+    def __init__(
+        self,
+        origin: str = DEFAULT_REGISTRY_ORIGIN,
+        role: Role | None = None,
+        package_name_override: str | None = None,
+    ):
         self._store: dict[str, BoundRegistryAction[ArgsClsT]] = {}
         self._is_initialized: bool = False
         self._origin = origin
+        self._package_name_override = package_name_override
         self.role = role or ctx_role.get()
 
     def __contains__(self, name: str) -> bool:
@@ -395,19 +436,21 @@ class Repository:
                     "Local repository is not a git repository, skipping commit SHA"
                 )
 
-            # Install the package in editable mode
-            extra_args = []
-            if config.TRACECAT__APP_ENV == "production":
-                # We set PYTHONUSERBASE in the prod Dockerfile
-                # Otherwise default to the user's home dir at ~/.local
-                python_user_base = (
-                    os.getenv("PYTHONUSERBASE")
-                    or Path.home().joinpath(".local").as_posix()
-                )
-                logger.debug(
-                    "Installing to PYTHONUSERBASE", python_user_base=python_user_base
-                )
-                extra_args = ["--target", python_user_base]
+            # Install the package in editable mode to the custom registry target.
+            # We use --target to isolate custom registry dependencies from the
+            # main tracecat venv, and --python to ensure compatibility with the
+            # current interpreter.
+            target_dir = get_custom_registry_target()
+            extra_args = [
+                "--python",
+                sys.executable,
+                "--target",
+                str(target_dir),
+            ]
+            logger.debug(
+                "Installing local repository to target",
+                target=str(target_dir),
+            )
 
             cmd = ["uv", "pip", "install", "--refresh", "--editable"]
             process = await asyncio.create_subprocess_exec(
@@ -469,7 +512,9 @@ class Repository:
                     "Invalid Git repository URL. Please provide a valid Git SSH URL (git+ssh)."
                 ) from e
             package_name = (
-                await get_setting("git_repo_package_name", role=self.role) or repo_name
+                self._package_name_override
+                or await get_setting("git_repo_package_name", role=self.role)
+                or repo_name
             )
             logger.debug(
                 "Parsed Git repository URL",
@@ -523,6 +568,11 @@ class Repository:
         Raises:
             ImportError: If there is an error importing the module
         """
+        # Ensure the custom registry target is in sys.path before importing.
+        # This is required because packages are installed to --target dir,
+        # which is separate from the main tracecat venv.
+        ensure_custom_registry_path()
+
         try:
             logger.info("Importing repository module", module_name=module_name)
             # We only need to call this at the root level because
@@ -868,6 +918,13 @@ def generate_model_from_function(
                     # Only set the component if no default UI is provided
                     case Component():
                         manually_set_components.append(meta)
+                    # `tracecat_registry` (and sandboxed `registry-client` mode) provides
+                    # lightweight dataclass component definitions that are not instances
+                    # of `tracecat.registry.fields.Component`. These still need to
+                    # propagate to JSONSchema via `x-tracecat-component` so the frontend
+                    # can render specialized editors (code, textarea, etc).
+                    case _ if isinstance(getattr(meta, "component_id", None), str):
+                        manually_set_components.append(meta)
 
         final_components = manually_set_components or components
         if final_components:
@@ -986,10 +1043,30 @@ async def ensure_base_repository(
 async def install_remote_repository(
     repo_url: str, commit_sha: str, env: SshEnv
 ) -> None:
+    """Install a remote repository to the custom registry target directory.
+
+    Uses `uv pip install --target` instead of `uv add` to isolate custom
+    registry dependencies from the main tracecat virtual environment.
+    This prevents dependency conflicts between tracecat and user repositories.
+    """
     logger.info("Loading remote repository", url=repo_url, commit_sha=commit_sha)
 
-    cmd = ["uv", "add", "--refresh", f"{repo_url}@{commit_sha}"]
-    logger.debug("Installation command", cmd=cmd)
+    target_dir = get_custom_registry_target()
+    cmd = [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        sys.executable,
+        "--target",
+        str(target_dir),
+        "--refresh",
+        f"{repo_url}@{commit_sha}",
+    ]
+    logger.debug(
+        "Installation command",
+        cmd=cmd,
+    )
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,

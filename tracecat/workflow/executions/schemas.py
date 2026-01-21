@@ -20,6 +20,7 @@ from tracecat_ee.agent.types import AgentWorkflowID
 from tracecat_ee.agent.workflows.durable import AgentWorkflowArgs
 
 from tracecat.auth.types import Role
+from tracecat.dsl.action import ScatterActionInput
 from tracecat.dsl.common import (
     AgentActionMemo,
     ChildWorkflowMemo,
@@ -46,9 +47,8 @@ from tracecat.logger import logger
 from tracecat.sessions import Session
 from tracecat.workflow.executions.common import (
     HISTORY_TO_WF_EVENT_TYPE,
-    UTILITY_ACTIONS,
     extract_first,
-    is_utility_activity,
+    is_action_activity,
 )
 from tracecat.workflow.executions.enums import (
     ExecutionType,
@@ -193,16 +193,18 @@ class EventGroup[T: EventInput](BaseModel):
         activity_input_data = await extract_first(attrs.input)
 
         act_type = attrs.activity_type.name
-        if is_utility_activity(act_type):
-            return None
+        # Handle specific activity types we care about
         if act_type == "get_workflow_definition_activity":
             action_input = GetWorkflowDefinitionActivityInputs(**activity_input_data)
-        else:
+        elif is_action_activity(act_type):
             try:
                 action_input = RunActionInput(**activity_input_data)
             except Exception as e:
                 logger.warning("Error parsing run action input", error=e)
                 return None
+        else:
+            # Skip all other activities (utility, internal, etc.)
+            return None
         if action_input.task is None:
             # It's a utility action.
             return None
@@ -420,9 +422,36 @@ class WorkflowExecutionEventCompact[TInput: Any, TResult: Any, TSessionEvent: An
         activity_input_data = await extract_first(attrs.input)
 
         act_type = attrs.activity_type.name
-        if act_type in (UTILITY_ACTIONS | {"get_workflow_definition_activity"}):
-            logger.trace("Utility action is not supported.", act_type=act_type)
+        # Only parse activities that use action schemas
+        if not is_action_activity(act_type):
+            logger.trace("Skipping non-action activity", act_type=act_type)
             return None
+
+        # Handle ScatterActionInput for scatter activities
+        if act_type == "handle_scatter_input_activity":
+            try:
+                scatter_input = ScatterActionInput(**activity_input_data)
+            except Exception as e:
+                logger.warning("Error parsing scatter action input", error=e)
+                return None
+            task = scatter_input.task
+            if task is None:
+                logger.debug("Scatter input task is None", event_id=event.event_id)
+                return None
+
+            return WorkflowExecutionEventCompact(
+                source_event_id=event.event_id,
+                schedule_time=event.event_time.ToDatetime(UTC),
+                curr_event_type=HISTORY_TO_WF_EVENT_TYPE[event.event_type],
+                status=WorkflowExecutionEventStatus.SCHEDULED,
+                action_name=task.action,
+                action_ref=task.ref,
+                action_input=task.args,
+                stream_id=scatter_input.stream_id or ROOT_STREAM,
+                session=None,
+            )
+
+        # Handle RunActionInput for other action activities
         try:
             action_input = RunActionInput(**activity_input_data)
         except Exception as e:

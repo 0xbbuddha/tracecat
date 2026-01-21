@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 from temporalio import activity
 
 from tracecat.audit.logger import audit_log
+from tracecat.contexts import ctx_logical_time
 from tracecat.db.models import (
     Action,
     Tag,
@@ -21,17 +22,19 @@ from tracecat.db.models import (
     WorkflowDefinition,
     WorkflowTag,
 )
+from tracecat.dsl.action import materialize_context
 from tracecat.dsl.common import (
     DSLEntrypoint,
     DSLInput,
     build_action_statements_from_actions,
 )
-from tracecat.dsl.schemas import DSLConfig
+from tracecat.dsl.schemas import DSLConfig, ExecutionContext, RunContext
 from tracecat.dsl.view import RFGraph
 from tracecat.exceptions import (
     TracecatAuthorizationError,
     TracecatValidationError,
 )
+from tracecat.expressions.eval import eval_templated_object
 from tracecat.identifiers import WorkflowID
 from tracecat.identifiers.workflow import (
     LEGACY_WF_ID_PATTERN,
@@ -510,14 +513,11 @@ class WorkflowsManagementService(BaseService):
         title = params.title or now
         description = params.description or f"New workflow created {now}"
 
-        # Initialize registry_lock with latest versions
-        registry_lock = await self._get_latest_registry_lock()
-
+        # registry_lock will be resolved when workflow is committed with actions
         workflow = Workflow(
             title=title,
             description=description,
             workspace_id=self.role.workspace_id,
-            registry_lock=registry_lock,
         )
         # When we create a workflow, we automatically create a webhook
         # Add the Workflow to the session first to generate an ID
@@ -648,8 +648,11 @@ class WorkflowsManagementService(BaseService):
         if self.role.workspace_id is None:
             raise TracecatAuthorizationError("Workspace ID is required")
 
-        # Initialize registry_lock with latest versions
-        registry_lock = await self._get_latest_registry_lock()
+        # Resolve registry_lock with action bindings from the DSL
+        action_names = {action.action for action in dsl.actions}
+        lock_service = RegistryLockService(self.session, self.role)
+        resolved_lock = await lock_service.resolve_lock_with_bindings(action_names)
+        registry_lock = resolved_lock.model_dump()
 
         entrypoint = dsl.entrypoint.model_dump()
         workflow_kwargs = {
@@ -717,6 +720,7 @@ class WorkflowsManagementService(BaseService):
                 join_strategy=act_stmt.join_strategy,
             )
             new_action = Action(
+                id=uuid.uuid4(),
                 workspace_id=self.role.workspace_id,
                 workflow_id=workflow_id,
                 type=act_stmt.action,
@@ -758,25 +762,30 @@ class WorkflowsManagementService(BaseService):
         await self.session.flush()
         return actions
 
-    async def _get_latest_registry_lock(self) -> dict[str, str] | None:
-        """Get the latest registry versions lock.
-
-        Returns:
-            dict[str, str] | None: Maps origin -> version string, or None if
-            no versions exist yet (e.g., during initial setup before first sync).
-        """
-        lock_service = RegistryLockService(self.session, self.role)
-        lock = await lock_service.get_latest_versions_lock()
-        return lock if lock else None
-
     @staticmethod
     @activity.defn
     async def resolve_workflow_alias_activity(
+        ctx: RunContext,
+        operand: ExecutionContext,
         input: ResolveWorkflowAliasActivityInputs,
     ) -> WorkflowID | None:
+        # Resolve expr
+        # Materialize any StoredObjects in operand before evaluation
+        materialized = await materialize_context(operand)
+        token = ctx_logical_time.set(ctx.logical_time)
+        try:
+            evaluated_alias = eval_templated_object(
+                input.workflow_alias, operand=materialized
+            )
+        finally:
+            ctx_logical_time.reset(token)
+        if not isinstance(evaluated_alias, str):
+            raise TypeError(
+                f"Workflow alias expression must evaluate to a string. Got {type(evaluated_alias).__name__}"
+            )
         async with WorkflowsManagementService.with_session(input.role) as service:
             return await service.resolve_workflow_alias(
-                input.workflow_alias, use_committed=input.use_committed
+                evaluated_alias, use_committed=input.use_committed
             )
 
     @staticmethod

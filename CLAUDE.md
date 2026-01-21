@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
-Tracecat is a modern, open source automation platform built for security and IT engineers. Alternative to Tines/Splunk SOAR with YAML-based templates, no-code UI workflows, built-in lookup tables, case management, and Temporal orchestration.
+Tracecat is a modern, open source automation platform built for security and IT engineers. No-code UI workflows, built-in lookup tables, case management, and Temporal orchestration.
 
 ## Development Commands
 
@@ -36,15 +36,9 @@ uv sync
 
 ### Development Stack
 ```bash
-# Start development environment
-just dev
-# Or manually: docker compose -f docker-compose.dev.yml up
+# Standalone stack for use with git worktrees
+just cluster
 
-# Rebuild development stack (after dependency changes)
-just build-dev
-# Or manually: docker compose -f docker-compose.dev.yml build --no-cache
-
-# Access UI at http://localhost
 ```
 
 ### Testing
@@ -139,6 +133,11 @@ The codebase follows a three-tier type system to separate concerns and reduce ci
 
 ## Development Guidelines
 
+### Dependency Management and Security
+- **Always pin exact versions** in `pyproject.toml` (e.g., `package==1.2.3` not `package>=1.2.3`) to prevent supply chain attacks
+- When resolving merge conflicts in dependencies, ensure exact version pins are preserved
+- Security fixes should update the pinned version to the specific patched version, not use range constraints
+
 ### Python Standards
 - Use Python 3.11+ type hints with builtin types (`list`, `dict`, `set`)
 - Follow Google Python style guide
@@ -176,6 +175,7 @@ tracecat/agent/
 - Use "Title case example" over "Title Case Example" for UI text
 - Always use proper TypeScript type hints and avoid using `any` - use `unknown` if necessary
 - Avoid nested ternary statements - use `if/else` or `switch/case` instead
+- Place React hooks in `frontend/src/hooks/` directory (e.g., `use-inbox.ts`, `use-auth.ts`)
 
 ### UI Component Best Practices
 - **Avoid background colors on child elements within bordered containers**: When using shadcn components like SidebarInset that have rounded borders, don't add background colors (e.g., `bg-card`, `bg-background`) to immediate child elements. These backgrounds can paint over the parent's rounded border corners, making them appear cut off or missing. Instead, let the parent container handle the background styling.

@@ -10,8 +10,10 @@ on:
       - pyproject.toml
       - uv.lock
       - Dockerfile
+      - docker-compose.yml
+      - docker-compose.dev.yml
       - docker-compose.local.yml
-      - .github/workflows/test-integration-custom-registry.yml
+      - .github/workflows/run-integration-tests.yml
   pull_request:
     branches: ["main", "staging"]
     paths:
@@ -21,8 +23,10 @@ on:
       - pyproject.toml
       - uv.lock
       - Dockerfile
+      - docker-compose.yml
+      - docker-compose.dev.yml
       - docker-compose.local.yml
-      - .github/workflows/test-integration-custom-registry.yml
+      - .github/workflows/run-integration-tests.yml
   workflow_dispatch:
     inputs:
       git-ref:
@@ -111,7 +115,7 @@ jobs:
           COMPOSE_BAKE: "true"
           TRACECAT__UNSAFE_DISABLE_SM_MASKING: "true"
           TRACECAT__EXECUTOR_BACKEND: "direct"
-          TRACECAT__FEATURE_FLAGS: "registry-sync-v2"
+          TRACECAT__FEATURE_FLAGS: "registry-sync-v2,registry-client"
           # Disable sandboxed registry sync to use local subprocess instead of Temporal workflow
           # This avoids the need for Docker executor to handle RegistrySyncWorkflow
           TRACECAT__REGISTRY_SYNC_SANDBOX_ENABLED: "false"

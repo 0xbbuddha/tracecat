@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import secrets
 from contextlib import contextmanager
 from functools import partial
@@ -25,7 +24,11 @@ from tracecat import config
 from tracecat.auth.executor_tokens import verify_executor_token
 from tracecat.auth.schemas import UserRole
 from tracecat.auth.types import AccessLevel, Role
-from tracecat.auth.users import is_unprivileged, optional_current_active_user
+from tracecat.auth.users import (
+    current_active_user,
+    is_unprivileged,
+    optional_current_active_user,
+)
 from tracecat.authz.enums import WorkspaceRole
 from tracecat.authz.service import MembershipService, MembershipWithOrg
 from tracecat.contexts import ctx_role
@@ -68,13 +71,17 @@ def get_role_from_user(
     workspace_role: WorkspaceRole | None = None,
     service_id: InternalServiceID = "tracecat-api",
 ) -> Role:
+    # Superusers always get ADMIN access level
+    access_level = (
+        AccessLevel.ADMIN if user.is_superuser else USER_ROLE_TO_ACCESS_LEVEL[user.role]
+    )
     return Role(
         type="user",
         workspace_id=workspace_id,
         organization_id=organization_id,
         user_id=user.id,
         service_id=service_id,
-        access_level=USER_ROLE_TO_ACCESS_LEVEL[user.role],
+        access_level=access_level,
         workspace_role=workspace_role,
     )
 
@@ -104,10 +111,9 @@ async def _authenticate_service(
         msg = f"x-tracecat-role-service-id {service_role_id!r} invalid or not allowed"
         logger.error(msg)
         raise HTTP_EXC(msg)
-    try:
-        expected_key = os.environ["TRACECAT__SERVICE_KEY"]
-    except KeyError as e:
-        raise KeyError("TRACECAT__SERVICE_KEY is not set") from e
+    expected_key = config.TRACECAT__SERVICE_KEY
+    if not expected_key:
+        raise KeyError("TRACECAT__SERVICE_KEY is not set")
     if not secrets.compare_digest(api_key, expected_key):
         logger.error("Could not validate service key")
         raise CREDENTIALS_EXCEPTION
@@ -274,10 +280,21 @@ async def _role_dependency(
             workspace_role = membership_with_org.membership.role
             organization_id = membership_with_org.org_id
         else:
-            # Privileged user doesn't need workspace role verification
+            # No workspace specified; infer org from memberships when possible.
             workspace_role = None
-            # For privileged users, get organization_id from default or user's first workspace
             organization_id = config.TRACECAT__DEFAULT_ORG_ID
+            svc = MembershipService(session)
+            memberships_with_org = await svc.list_user_memberships_with_org(
+                user_id=user.id
+            )
+            org_ids = {m.org_id for m in memberships_with_org}
+            if len(org_ids) == 1:
+                organization_id = next(iter(org_ids))
+            elif len(org_ids) > 1:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Multiple organizations found. Provide workspace_id to select an organization.",
+                )
 
         role = get_role_from_user(
             user,
@@ -522,3 +539,36 @@ def RoleACL(
         return Depends(role_dependency_not_req_ws)
     else:
         raise ValueError(f"Invalid require_workspace value: {require_workspace}")
+
+
+# --- Platform-level (Superuser) Authentication ---
+
+
+async def _require_superuser(
+    user: Annotated[User, Depends(current_active_user)],
+) -> Role:
+    """Require superuser access for platform admin operations.
+
+    This dependency is used for /admin routes that require platform-level access.
+    Superusers can manage organizations, platform settings, and platform-level
+    registry sync operations.
+    """
+    if not user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden",
+        )
+    role = Role(
+        type="user",
+        user_id=user.id,
+        access_level=AccessLevel.ADMIN,
+        service_id="tracecat-api",
+        # NOTE: Platform routes are not org/workspace-scoped. Role still requires
+        # organization_id for backwards-compat in Phase 1.
+        organization_id=config.TRACECAT__DEFAULT_ORG_ID,
+    )
+    ctx_role.set(role)
+    return role
+
+
+SuperuserRole = Annotated[Role, Depends(_require_superuser)]

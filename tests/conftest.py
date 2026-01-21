@@ -8,13 +8,20 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import patch
 
+# Set workflow return strategy BEFORE importing tracecat modules
+# test_workflows.py was written when we returned the full context by default
+# This must happen before any tracecat imports to ensure config reads the correct value
+os.environ.setdefault("TRACECAT__WORKFLOW_RETURN_STRATEGY", "context")
+
 import aioboto3
 import pytest
+import redis
 import tracecat_registry.integrations.aws_boto3 as boto3_module
 from dotenv import load_dotenv
 from minio import Minio
 from minio.error import S3Error
 from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 from temporalio.client import Client
@@ -49,25 +56,41 @@ else:
     # Extract number from "gwN" format
     WORKER_OFFSET = int(WORKER_ID.replace("gw", ""))
 
-# MinIO test configuration - uses docker-compose service on port 9000
-# Credentials match .env.example (MINIO_ROOT_USER/MINIO_ROOT_PASSWORD)
-MINIO_PORT = 9000
-MINIO_ACCESS_KEY = "minio"
-MINIO_SECRET_KEY = "password"
+# Port configuration - reads from environment for worktree cluster support
+# Default ports are for cluster 1, override with PG_PORT, TEMPORAL_PORT, MINIO_PORT
+PG_PORT = int(os.environ.get("PG_PORT", "5432"))
+TEMPORAL_PORT = int(os.environ.get("TEMPORAL_PORT", "7233"))
+MINIO_PORT = int(os.environ.get("MINIO_PORT", "9000"))
+MINIO_WORKFLOW_BUCKET = "test-tracecat-workflow"
+
+
+def _minio_credentials() -> tuple[str, str]:
+    load_dotenv()
+    access_key = (
+        os.environ.get("AWS_ACCESS_KEY_ID")
+        or os.environ.get("MINIO_ROOT_USER")
+        or "minioadmin"
+    )
+    secret_key = (
+        os.environ.get("AWS_SECRET_ACCESS_KEY")
+        or os.environ.get("MINIO_ROOT_PASSWORD")
+        or "minioadmin"
+    )
+    return access_key, secret_key
+
 
 # ---------------------------------------------------------------------------
 # Redis test configuration
 # ---------------------------------------------------------------------------
 
-# Redis runs on standard port via docker-compose
-# REDIS_HOST is configurable for running tests inside containers (e.g., executor)
-REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
-REDIS_PORT = 6379
-
 # Worker-specific Redis database number for pytest-xdist isolation
 # Each xdist worker uses a different database (0-15) to avoid conflicts
 # when multiple workers run tests in parallel
 REDIS_DB = WORKER_OFFSET % 16
+
+# Redis URL from environment (matches docker-compose pattern)
+# Default to localhost for local development
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
 
 # ---------------------------------------------------------------------------
@@ -86,27 +109,24 @@ def redis_server():
     Each pytest-xdist worker uses a different Redis database number
     to ensure test isolation during parallel execution.
     """
-    import redis as redis_sync
-
-    client = redis_sync.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+    # Append worker-specific database number for isolation
+    worker_redis_url = f"{REDIS_URL}/{REDIS_DB}"
+    client = redis.Redis.from_url(worker_redis_url)
     for _ in range(30):
         try:
             if client.ping():
                 logger.info(
-                    f"Redis available at {REDIS_HOST}:{REDIS_PORT}, db={REDIS_DB} "
-                    f"(worker={WORKER_ID})"
+                    f"Redis available at {worker_redis_url} (worker={WORKER_ID})"
                 )
-                # Include database number in REDIS_URL for worker isolation
-                os.environ["REDIS_URL"] = (
-                    f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
-                )
+                # Set REDIS_URL with worker-specific database for isolation
+                os.environ["REDIS_URL"] = worker_redis_url
                 yield
                 return
         except Exception:
             time.sleep(1)
 
     pytest.fail(
-        f"Redis not available at {REDIS_HOST}:{REDIS_PORT}. "
+        f"Redis not available at {REDIS_URL}. "
         "Start it with: docker-compose -f docker-compose.dev.yml up -d redis"
     )
 
@@ -117,9 +137,7 @@ def clean_redis_db(redis_server):
 
     Uses worker-specific database to avoid affecting other xdist workers.
     """
-    import redis as redis_sync
-
-    client = redis_sync.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+    client = redis.Redis.from_url(os.environ["REDIS_URL"])
     client.flushdb()
     yield
     client.flushdb()
@@ -196,6 +214,400 @@ def db() -> Iterator[None]:
         default_engine.dispose()
 
 
+@pytest.fixture(autouse=True, scope="session")
+def registry_version_with_manifest(db: None, env_sandbox: None) -> Iterator[None]:
+    """Session-scoped fixture to create a RegistryVersion with manifest for core actions.
+
+    This enables versioned action resolution in workflow tests. The manifest includes
+    core actions like core.transform.reshape, core.http_request, etc.
+
+    Uses sync SQLAlchemy to avoid event loop conflicts with async fixtures.
+    """
+    from sqlalchemy.orm import Session
+
+    from tracecat.db.models import RegistryRepository, RegistryVersion
+
+    def _seed_registry_version(sync_db_uri: str) -> None:
+        # Use sync engine to avoid event loop conflicts.
+        sync_db_uri = sync_db_uri.replace("+asyncpg", "+psycopg")
+        sync_engine = create_engine(sync_db_uri)
+
+        # Ensure schema exists for service sessions that target the default DB.
+        Base.metadata.create_all(sync_engine)
+
+        with Session(sync_engine) as session:
+            session.execute(
+                text(
+                    """
+                    INSERT INTO organization (id, name, slug, is_active, created_at, updated_at)
+                    VALUES (
+                        '00000000-0000-0000-0000-000000000000',
+                        'Default Organization',
+                        'default',
+                        true,
+                        now(),
+                        now()
+                    )
+                    ON CONFLICT (id) DO NOTHING
+                    """
+                )
+            )
+            session.commit()
+            # Create a registry repository for core actions
+            origin = "tracecat_registry"
+            repo = session.scalar(
+                select(RegistryRepository).where(
+                    RegistryRepository.organization_id
+                    == config.TRACECAT__DEFAULT_ORG_ID,
+                    RegistryRepository.origin == origin,
+                )
+            )
+            if repo is None:
+                repo = RegistryRepository(
+                    organization_id=config.TRACECAT__DEFAULT_ORG_ID,
+                    origin=origin,
+                )
+                session.add(repo)
+                try:
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()
+                    repo = session.scalar(
+                        select(RegistryRepository).where(
+                            RegistryRepository.organization_id
+                            == config.TRACECAT__DEFAULT_ORG_ID,
+                            RegistryRepository.origin == origin,
+                        )
+                    )
+                    if repo is None:
+                        raise
+                else:
+                    session.refresh(repo)
+
+            # Create manifest with core actions used in tests
+            manifest_actions = {}
+
+            # Core transform actions
+            core_transform_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.transform",
+                "name": "reshape",
+            }
+            manifest_actions["core.transform.reshape"] = {
+                "namespace": "core.transform",
+                "name": "reshape",
+                "action_type": "udf",
+                "description": "Reshapes the input value to the output",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": core_transform_impl,
+            }
+
+            # core.http_request
+            http_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.http",
+                "name": "http_request",
+            }
+            manifest_actions["core.http_request"] = {
+                "namespace": "core",
+                "name": "http_request",
+                "action_type": "udf",
+                "description": "Make an HTTP request",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": http_impl,
+            }
+
+            # core.workflow.execute
+            wf_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.workflow",
+                "name": "execute",
+            }
+            manifest_actions["core.workflow.execute"] = {
+                "namespace": "core.workflow",
+                "name": "execute",
+                "action_type": "udf",
+                "description": "Execute a child workflow",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": wf_impl,
+            }
+
+            # core.transform.filter
+            filter_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.transform",
+                "name": "filter",
+            }
+            manifest_actions["core.transform.filter"] = {
+                "namespace": "core.transform",
+                "name": "filter",
+                "action_type": "udf",
+                "description": "Filter a collection",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": filter_impl,
+            }
+
+            # core.transform.transform (alias for reshape in some tests)
+            transform_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.transform",
+                "name": "reshape",
+            }
+            manifest_actions["core.transform.transform"] = {
+                "namespace": "core.transform",
+                "name": "transform",
+                "action_type": "udf",
+                "description": "Transform data",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": transform_impl,
+            }
+
+            # core.send_email (used in some template tests)
+            email_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.email",
+                "name": "send_email",
+            }
+            manifest_actions["core.send_email"] = {
+                "namespace": "core",
+                "name": "send_email",
+                "action_type": "udf",
+                "description": "Send an email",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": email_impl,
+            }
+
+            # core.open_case
+            open_case_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.cases",
+                "name": "open_case",
+            }
+            manifest_actions["core.open_case"] = {
+                "namespace": "core",
+                "name": "open_case",
+                "action_type": "udf",
+                "description": "Open a case",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": open_case_impl,
+            }
+
+            # core.table.lookup
+            table_lookup_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.table",
+                "name": "lookup",
+            }
+            manifest_actions["core.table.lookup"] = {
+                "namespace": "core.table",
+                "name": "lookup",
+                "action_type": "udf",
+                "description": "Lookup table value",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": table_lookup_impl,
+            }
+
+            # core.table.insert
+            table_insert_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.table",
+                "name": "insert",
+            }
+            manifest_actions["core.table.insert"] = {
+                "namespace": "core.table",
+                "name": "insert",
+                "action_type": "udf",
+                "description": "Insert table row",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": table_insert_impl,
+            }
+
+            # core.table.insert_row
+            table_insert_row_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.table",
+                "name": "insert_row",
+            }
+            manifest_actions["core.table.insert_row"] = {
+                "namespace": "core.table",
+                "name": "insert_row",
+                "action_type": "udf",
+                "description": "Insert a row into a table",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": table_insert_row_impl,
+            }
+
+            # core.script.run_python
+            script_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.script",
+                "name": "run_python",
+            }
+            manifest_actions["core.script.run_python"] = {
+                "namespace": "core.script",
+                "name": "run_python",
+                "action_type": "udf",
+                "description": "Run a Python script",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": script_impl,
+            }
+
+            # core.ai.extract
+            ai_extract_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.ai",
+                "name": "extract",
+            }
+            manifest_actions["core.ai.extract"] = {
+                "namespace": "core.ai",
+                "name": "extract",
+                "action_type": "udf",
+                "description": "AI extraction",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": ai_extract_impl,
+            }
+
+            # core.transform.map
+            map_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.transform",
+                "name": "map",
+            }
+            manifest_actions["core.transform.map"] = {
+                "namespace": "core.transform",
+                "name": "map",
+                "action_type": "udf",
+                "description": "Map over items",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": map_impl,
+            }
+
+            # integrations.sinks.webhook
+            webhook_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.integrations.sinks",
+                "name": "webhook",
+            }
+            manifest_actions["integrations.sinks.webhook"] = {
+                "namespace": "integrations.sinks",
+                "name": "webhook",
+                "action_type": "udf",
+                "description": "Send webhook",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": webhook_impl,
+            }
+
+            # core.transform.scatter (interface action)
+            scatter_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.transform",
+                "name": "scatter",
+            }
+            manifest_actions["core.transform.scatter"] = {
+                "namespace": "core.transform",
+                "name": "scatter",
+                "action_type": "udf",
+                "description": "Scatter collection into parallel streams",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": scatter_impl,
+            }
+
+            # core.transform.gather (interface action)
+            gather_impl = {
+                "type": "udf",
+                "url": origin,
+                "module": "tracecat_registry.core.transform",
+                "name": "gather",
+            }
+            manifest_actions["core.transform.gather"] = {
+                "namespace": "core.transform",
+                "name": "gather",
+                "action_type": "udf",
+                "description": "Gather results from parallel streams",
+                "interface": {"expects": {}, "returns": None},
+                "implementation": gather_impl,
+            }
+
+            manifest = {"schema_version": "1.0", "actions": manifest_actions}
+
+            # Create RegistryVersion with manifest
+            version = "test-version"
+            rv = session.scalar(
+                select(RegistryVersion).where(
+                    RegistryVersion.organization_id == config.TRACECAT__DEFAULT_ORG_ID,
+                    RegistryVersion.repository_id == repo.id,
+                    RegistryVersion.version == version,
+                )
+            )
+            if rv is None:
+                rv = RegistryVersion(
+                    organization_id=config.TRACECAT__DEFAULT_ORG_ID,
+                    repository_id=repo.id,
+                    version=version,
+                    manifest=manifest,
+                    tarball_uri="s3://test/test.tar.gz",
+                )
+                session.add(rv)
+                try:
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()
+                    rv = session.scalar(
+                        select(RegistryVersion).where(
+                            RegistryVersion.organization_id
+                            == config.TRACECAT__DEFAULT_ORG_ID,
+                            RegistryVersion.repository_id == repo.id,
+                            RegistryVersion.version == version,
+                        )
+                    )
+                    if rv is None:
+                        raise
+                else:
+                    session.refresh(rv)
+            else:
+                rv.manifest = manifest
+                rv.tarball_uri = "s3://test/test.tar.gz"
+                session.commit()
+
+            # Set current_version_id on the repository for lock resolution
+            repo.current_version_id = rv.id
+            session.commit()
+
+            logger.info(
+                "Created registry version with manifest",
+                extra={
+                    "db_uri": sync_db_uri,
+                    "version": version,
+                    "num_actions": len(manifest_actions),
+                },
+            )
+
+        sync_engine.dispose()
+
+    # Seed both the per-test database and the default engine DB (used by services via with_session()).
+    target_uris = {TEST_DB_CONFIG.test_url_sync, config.TRACECAT__DB_URI}
+    for uri in sorted(target_uris):
+        _seed_registry_version(uri)
+
+    yield
+    # No cleanup needed - the database is dropped at the end of the session
+
+
 @pytest.fixture(scope="function")
 async def session() -> AsyncGenerator[AsyncSession, None]:
     """Creates a new database session joined to an external transaction.
@@ -244,7 +656,7 @@ def env_sandbox(monkeysession: pytest.MonkeyPatch):
     monkeysession.setattr(config, "TRACECAT__APP_ENV", "development")
 
     # Detect if running inside Docker container by checking for /.dockerenv file
-    # This is more reliable than checking env vars like REDIS_HOST, which may be
+    # This is more reliable than checking env vars like REDIS_URL, which may be
     # loaded from .env by load_dotenv() even when running on the host
     in_docker = os.path.exists("/.dockerenv")
     db_host = "postgres_db" if in_docker else "localhost"
@@ -252,25 +664,28 @@ def env_sandbox(monkeysession: pytest.MonkeyPatch):
     api_host = "api" if in_docker else "localhost"
     blob_storage_host = "minio" if in_docker else "localhost"
 
-    db_uri = f"postgresql+psycopg://postgres:postgres@{db_host}:5432/postgres"
+    db_uri = f"postgresql+psycopg://postgres:postgres@{db_host}:{PG_PORT}/postgres"
     monkeysession.setattr(config, "TRACECAT__DB_URI", db_uri)
     monkeysession.setattr(
-        config, "TEMPORAL__CLUSTER_URL", f"http://{temporal_host}:7233"
+        config, "TEMPORAL__CLUSTER_URL", f"http://{temporal_host}:{TEMPORAL_PORT}"
     )
     blob_storage_endpoint = f"http://{blob_storage_host}:{MINIO_PORT}"
     monkeysession.setattr(
         config, "TRACECAT__BLOB_STORAGE_ENDPOINT", blob_storage_endpoint
     )
+    # Configure MinIO for result externalization (StoredObject -> S3)
+    monkeysession.setattr(
+        config, "TRACECAT__BLOB_STORAGE_BUCKET_WORKFLOW", MINIO_WORKFLOW_BUCKET
+    )
+    monkeysession.setattr(config, "TRACECAT__RESULT_EXTERNALIZATION_ENABLED", True)
+    # Externalize all results for testing (threshold=0)
+    monkeysession.setattr(config, "TRACECAT__RESULT_EXTERNALIZATION_THRESHOLD_BYTES", 0)
     monkeysession.setattr(config, "TRACECAT__AUTH_ALLOWED_DOMAINS", ["tracecat.com"])
     if os.getenv("TRACECAT__CONTEXT_COMPRESSION_ENABLED"):
         logger.info("Enabling compression for workflow context")
         monkeysession.setattr(config, "TRACECAT__CONTEXT_COMPRESSION_ENABLED", True)
         # Force compression for local unit tests
         monkeysession.setattr(config, "TRACECAT__CONTEXT_COMPRESSION_THRESHOLD_KB", 0)
-
-    # test_workflows.py was written when we returned the full context by default
-    monkeysession.setattr(config, "TRACECAT__WORKFLOW_RETURN_STRATEGY", "context")
-    monkeysession.setenv("TRACECAT__WORKFLOW_RETURN_STRATEGY", "context")
 
     # Add Homebrew path for macOS development environments
     monkeysession.setattr(
@@ -281,6 +696,11 @@ def env_sandbox(monkeysession: pytest.MonkeyPatch):
 
     monkeysession.setenv("TRACECAT__DB_URI", db_uri)
     monkeysession.setenv("TRACECAT__BLOB_STORAGE_ENDPOINT", blob_storage_endpoint)
+    monkeysession.setenv(
+        "TRACECAT__BLOB_STORAGE_BUCKET_WORKFLOW", MINIO_WORKFLOW_BUCKET
+    )
+    monkeysession.setenv("TRACECAT__RESULT_EXTERNALIZATION_ENABLED", "true")
+    monkeysession.setenv("TRACECAT__RESULT_EXTERNALIZATION_THRESHOLD_BYTES", "0")
     # monkeysession.setenv("TRACECAT__DB_ENCRYPTION_KEY", Fernet.generate_key().decode())
     # Point API URL to appropriate host
     api_url = f"http://{api_host}:8000"
@@ -516,10 +936,11 @@ def minio_server():
     endpoint = f"localhost:{MINIO_PORT}"
     for _ in range(30):
         try:
+            access_key, secret_key = _minio_credentials()
             client = Minio(
                 endpoint,
-                access_key=MINIO_ACCESS_KEY,
-                secret_key=MINIO_SECRET_KEY,
+                access_key=access_key,
+                secret_key=secret_key,
                 secure=False,
             )
             list(client.list_buckets())
@@ -535,13 +956,58 @@ def minio_server():
     )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def workflow_bucket(minio_server, env_sandbox):
+    """Create the workflow bucket for result externalization and reset object storage.
+
+    This fixture:
+    1. Creates the bucket used by S3ObjectStorage for StoredObject externalization
+    2. Reloads the blob module to pick up the test config
+    3. Resets the object storage singleton so it uses S3ObjectStorage
+
+    Session-scoped and autouse to ensure all tests use S3-backed object storage.
+    Depends on env_sandbox to ensure config is set before we create the bucket.
+    """
+    from tracecat.storage import blob
+    from tracecat.storage import object as object_module
+
+    # Reload blob module to pick up MinIO config
+    importlib.reload(blob)
+
+    # Create workflow bucket if it doesn't exist
+    access_key, secret_key = _minio_credentials()
+    client = Minio(
+        f"localhost:{MINIO_PORT}",
+        access_key=access_key,
+        secret_key=secret_key,
+        secure=False,
+    )
+    try:
+        if not client.bucket_exists(MINIO_WORKFLOW_BUCKET):
+            client.make_bucket(MINIO_WORKFLOW_BUCKET)
+            logger.info(f"Created workflow bucket: {MINIO_WORKFLOW_BUCKET}")
+    except S3Error as e:
+        if e.code != "BucketAlreadyOwnedByYou":
+            raise
+
+    # Reset object storage singleton so it picks up the test config (S3ObjectStorage)
+    object_module.reset_object_storage()
+    logger.info("Reset object storage for S3-backed externalization")
+
+    yield
+
+    # Cleanup: reset object storage after tests
+    object_module.reset_object_storage()
+
+
 @pytest.fixture
 async def minio_client(minio_server) -> AsyncGenerator[Minio, None]:
     """Create MinIO client for testing."""
+    access_key, secret_key = _minio_credentials()
     client = Minio(
         f"localhost:{MINIO_PORT}",
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
+        access_key=access_key,
+        secret_key=secret_key,
         secure=False,
     )
     yield client
@@ -576,9 +1042,9 @@ async def minio_bucket(minio_client: Minio) -> AsyncGenerator[str, None]:
 @pytest.fixture
 def mock_s3_secrets():
     """Mock S3 secrets to use MinIO credentials."""
-
-    secrets_manager.set("AWS_ACCESS_KEY_ID", MINIO_ACCESS_KEY)
-    secrets_manager.set("AWS_SECRET_ACCESS_KEY", MINIO_SECRET_KEY)
+    access_key, secret_key = _minio_credentials()
+    secrets_manager.set("AWS_ACCESS_KEY_ID", access_key)
+    secrets_manager.set("AWS_SECRET_ACCESS_KEY", secret_key)
     secrets_manager.set("AWS_REGION", "us-east-1")
 
 
@@ -588,9 +1054,10 @@ async def aioboto3_minio_client(monkeypatch):
 
     # Mock get_session to return session with MinIO credentials
     async def mock_get_session():
+        access_key, secret_key = _minio_credentials()
         return aioboto3.Session(
-            aws_access_key_id=MINIO_ACCESS_KEY,
-            aws_secret_access_key=MINIO_SECRET_KEY,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
             region_name="us-east-1",
         )
 
@@ -798,3 +1265,31 @@ def mock_slack_secrets():
 
         mock_get.side_effect = side_effect
         yield mock_get
+
+
+# ---------------------------------------------------------------------------
+# Agent fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def mock_agent_session(session: AsyncSession, svc_role: Role):
+    """Create a mock AgentSession directly in the database.
+
+    This is a lightweight fixture for tests that need a valid session_id
+    to satisfy foreign key constraints (e.g., approval tests).
+    """
+    from tracecat.db.models import AgentSession
+
+    session_id = uuid.uuid4()
+    agent_session = AgentSession(
+        id=session_id,
+        title="Mock Test Session",
+        workspace_id=svc_role.workspace_id,
+        entity_type="workflow",
+        entity_id=uuid.uuid4(),
+    )
+    session.add(agent_session)
+    await session.commit()
+    await session.refresh(agent_session)
+    return agent_session

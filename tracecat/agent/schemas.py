@@ -11,7 +11,6 @@ from typing import (
 )
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from pydantic_ai import RunUsage
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
@@ -19,6 +18,7 @@ from pydantic_ai.tools import DeferredToolResults
 
 from tracecat.agent.types import AgentConfig
 from tracecat.auth.types import Role
+from tracecat.chat.schemas import ChatMessage
 
 
 class ModelInfo(BaseModel):
@@ -44,6 +44,8 @@ class RunAgentArgs(BaseModel):
     """Results for deferred tool calls from a previous run (CE handshake)."""
     is_continuation: bool = False
     """If True, do not emit a new user message; continue prior run with deferred results."""
+    use_workspace_credentials: bool = True
+    """Credential scope for LiteLLM gateway."""
 
     @model_validator(mode="after")
     def validate_config_or_preset(self) -> RunAgentArgs:
@@ -148,11 +150,27 @@ class ModelCredentialUpdate(BaseModel):
     )
 
 
+class RunUsage(BaseModel):
+    """LLM usage associated with an agent run."""
+
+    requests: int = 0
+    """Number of requests made to the LLM API."""
+
+    tool_calls: int = 0
+    """Number of tool calls executed during the run."""
+
+    input_tokens: int = 0
+    """Total number of input tokens."""
+
+    output_tokens: int = 0
+    """Total number of output tokens."""
+
+
 class AgentOutput(BaseModel):
     output: Any
-    message_history: list[ModelMessage] | None = None
+    message_history: list[ChatMessage] | None = None
     duration: float
-    usage: RunUsage
+    usage: RunUsage | None = None
     session_id: uuid.UUID
 
 

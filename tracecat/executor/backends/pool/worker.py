@@ -41,7 +41,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 # =============================================================================
 from tracecat import config  # noqa: E402
 from tracecat.auth.types import Role  # noqa: E402
-from tracecat.dsl.schemas import RunActionInput  # noqa: E402
+from tracecat.contexts import ctx_role  # noqa: E402
 from tracecat.executor.minimal_runner import run_action_minimal_async  # noqa: E402
 from tracecat.executor.schemas import (  # noqa: E402
     ExecutorActionErrorInfo,
@@ -100,8 +100,14 @@ async def handle_task(request: dict[str, Any]) -> dict[str, Any]:
 
     try:
         # Parse input
+        # NOTE: We don't validate RunActionInput strictly because exec_context may be
+        # MaterializedExecutionContext (raw values) after materialize_context() in the
+        # activity. The pool worker only needs task metadata for logging - actual
+        # execution uses resolved_context.evaluated_args which is already resolved.
         start = time.monotonic()
-        input_obj = RunActionInput.model_validate(request["input"])
+        input_dict = request["input"]
+        task_dict = input_dict.get("task", {})
+        action_name = task_dict.get("action", "unknown")
         role = Role.model_validate(request["role"])
         resolved_context = ResolvedContext.model_validate(request["resolved_context"])
         timing["parse_ms"] = (time.monotonic() - start) * 1000
@@ -111,14 +117,14 @@ async def handle_task(request: dict[str, Any]) -> dict[str, Any]:
             timing["total_ms"] = (time.monotonic() - start_total) * 1000
             logger.info(
                 "Task completed (test mode)",
-                action=input_obj.task.action,
+                action=action_name,
                 timing=timing,
             )
             return {
                 "type": "success",
                 "result": {
                     "test_mode": True,
-                    "action": input_obj.task.action,
+                    "action": action_name,
                     "workspace_id": str(role.workspace_id)
                     if role.workspace_id
                     else None,
@@ -128,6 +134,9 @@ async def handle_task(request: dict[str, Any]) -> dict[str, Any]:
 
         # Ensure tarball paths are in sys.path for custom registry modules
         _ensure_tarball_paths_in_sys_path()
+
+        # Set the role context for actions that need it (e.g., core.cases, core.table)
+        ctx_role.set(role)
 
         # Execute action using minimal runner (no DB access, explicit context)
         start = time.monotonic()
@@ -146,7 +155,7 @@ async def handle_task(request: dict[str, Any]) -> dict[str, Any]:
 
         logger.info(
             "Task completed",
-            action=input_obj.task.action,
+            action=action_name,
             timing=timing,
         )
 
@@ -400,7 +409,7 @@ async def _heartbeat_loop(worker_id: int, interval: float = 30.0) -> None:
         expected_elapsed = interval
         delay = elapsed - expected_elapsed
 
-        logger.info(
+        logger.debug(
             "Pool worker heartbeat",
             worker_id=worker_id,
             active_connections=_active_connections,

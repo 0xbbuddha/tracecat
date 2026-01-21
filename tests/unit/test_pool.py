@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from tracecat.auth.types import Role
+from tracecat.dsl.common import create_default_execution_context
 from tracecat.dsl.schemas import ActionStatement, RunActionInput, RunContext
 from tracecat.executor.backends.pool import (
     WorkerInfo,
@@ -21,6 +23,7 @@ from tracecat.executor.backends.pool import (
 from tracecat.executor.backends.pool.pool import get_available_cpus
 from tracecat.executor.schemas import ActionImplementation, ResolvedContext
 from tracecat.identifiers.workflow import WorkflowUUID
+from tracecat.registry.lock.types import RegistryLock
 
 
 @pytest.fixture
@@ -44,12 +47,17 @@ def mock_run_action_input() -> RunActionInput:
             args={"url": "https://example.com"},
             ref="test_action",
         ),
-        exec_context={},
+        exec_context=create_default_execution_context(),
         run_context=RunContext(
             wf_id=wf_id,
             wf_exec_id=f"{wf_id.short()}/exec_test",
             wf_run_id=uuid.uuid4(),
             environment="test",
+            logical_time=datetime.now(UTC),
+        ),
+        registry_lock=RegistryLock(
+            origins={"tracecat_registry": "test-version"},
+            actions={"core.http_request": "tracecat_registry"},
         ),
     )
 

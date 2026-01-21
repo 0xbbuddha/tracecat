@@ -13,7 +13,7 @@ bench *args:
 		--cap-add SYS_ADMIN \
 		--security-opt seccomp=unconfined \
 		--env-file .env \
-		-e REDIS_HOST=redis \
+		-e REDIS_URL=redis://redis:6379 \
 		-e TRACECAT__BLOB_STORAGE_ENDPOINT=http://minio:9000 \
 		-e TRACECAT__DB_URI=postgresql+psycopg://postgres:postgres@postgres_db:5432/postgres \
 		-v "$(pwd)/tests:/app/tests:ro" \
@@ -50,12 +50,12 @@ build:
 lint-ui:
 	pnpm -C frontend lint:fix
 lint-app:
-	ruff check
+	uv run ruff check
 
 lint-fix-ui:
 	pnpm -C frontend check
 lint-fix-app:
-	ruff check . --fix && ruff format .
+	uv run ruff check . --fix && uv run ruff format .
 
 lint: lint-ui lint-app
 lint-fix: lint-fix-ui lint-fix-app
@@ -82,3 +82,7 @@ _check-temporal-cli:
 # Stop all running Temporal workflow executions
 temporal-stop-all: _check-temporal-cli
 	temporal workflow terminate --query "ExecutionStatus='Running'" --namespace default --yes
+
+# Manage multiple Tracecat clusters (run `just cluster` for usage)
+cluster *args:
+	./scripts/cluster {{args}}

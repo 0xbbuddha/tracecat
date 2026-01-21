@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Sequence
 
 from pydantic import SecretStr
@@ -14,16 +13,12 @@ from tracecat.auth.types import Role
 from tracecat.db.models import BaseSecret, OrganizationSecret, Secret
 from tracecat.exceptions import (
     TracecatAuthorizationError,
-    TracecatCredentialsError,
     TracecatCredentialsNotFoundError,
     TracecatNotFoundError,
 )
 from tracecat.identifiers import SecretID
 from tracecat.logger import logger
-from tracecat.registry.constants import (
-    REGISTRY_GIT_SSH_KEY_SECRET_NAME,
-    STORE_GIT_SSH_KEY_SECRET_NAME,
-)
+from tracecat.registry.constants import REGISTRY_GIT_SSH_KEY_SECRET_NAME
 from tracecat.secrets.constants import DEFAULT_SECRETS_ENVIRONMENT
 from tracecat.secrets.encryption import decrypt_keyvalues, encrypt_keyvalues
 from tracecat.secrets.enums import SecretType
@@ -47,10 +42,9 @@ class SecretsService(BaseService):
 
     def __init__(self, session: AsyncSession, role: Role | None = None):
         super().__init__(session, role=role)
-        try:
-            self._encryption_key = os.environ["TRACECAT__DB_ENCRYPTION_KEY"]
-        except KeyError as e:
-            raise KeyError("TRACECAT__DB_ENCRYPTION_KEY is not set") from e
+        self._encryption_key = config.TRACECAT__DB_ENCRYPTION_KEY
+        if not self._encryption_key:
+            raise KeyError("TRACECAT__DB_ENCRYPTION_KEY is not set")
 
     def decrypt_keys(self, encrypted_keys: bytes) -> list[SecretKeyValue]:
         """Decrypt and return the keys for a secret."""
@@ -287,7 +281,7 @@ class SecretsService(BaseService):
         """List all organization secrets."""
 
         stmt = select(OrganizationSecret).where(
-            OrganizationSecret.organization_id == config.TRACECAT__DEFAULT_ORG_ID
+            OrganizationSecret.organization_id == self.organization_id
         )
         if types:
             stmt = stmt.where(OrganizationSecret.type.in_(types))
@@ -298,7 +292,7 @@ class SecretsService(BaseService):
         """Get an organization secret by ID."""
 
         statement = select(OrganizationSecret).where(
-            OrganizationSecret.organization_id == config.TRACECAT__DEFAULT_ORG_ID,
+            OrganizationSecret.organization_id == self.organization_id,
             OrganizationSecret.id == secret_id,
         )
         result = await self.session.execute(statement)
@@ -312,7 +306,7 @@ class SecretsService(BaseService):
         """Retrieve an organization-wide secret by its name."""
         environment = environment or DEFAULT_SECRETS_ENVIRONMENT
         statement = select(OrganizationSecret).where(
-            OrganizationSecret.organization_id == config.TRACECAT__DEFAULT_ORG_ID,
+            OrganizationSecret.organization_id == self.organization_id,
             OrganizationSecret.name == secret_name,
             OrganizationSecret.environment == environment,
         )
@@ -340,7 +334,7 @@ class SecretsService(BaseService):
         elif params.type == SecretType.CA_CERT:
             validate_ca_cert_values(params.keys)
         secret = OrganizationSecret(
-            organization_id=config.TRACECAT__DEFAULT_ORG_ID,
+            organization_id=self.organization_id,
             name=params.name,
             type=params.type,
             description=params.description,
@@ -373,8 +367,6 @@ class SecretsService(BaseService):
         match target:
             case "registry":
                 return await self.get_registry_ssh_key(key_name, environment)
-            case "store":
-                return await self.get_store_ssh_key(key_name, environment)
             case _:
                 raise ValueError(f"Invalid target: {target}")
 
@@ -397,30 +389,4 @@ class SecretsService(BaseService):
             raise TracecatCredentialsNotFoundError(
                 f"SSH key {key_name} not found. Please check whether this key exists.\n\n"
                 " If not, please create a key in your organization's credentials page and try again."
-            ) from e
-
-    async def get_store_ssh_key(
-        self, key_name: str | None = None, environment: str | None = None
-    ) -> SecretStr:
-        """Get the SSH key for the store."""
-        key_name = key_name or STORE_GIT_SSH_KEY_SECRET_NAME
-        try:
-            secret = await self.get_secret_by_name(key_name, environment)
-            if secret.type != SecretType.SSH_KEY:
-                raise TracecatCredentialsError(
-                    f"SSH key type mismatch. Expected SSH key, got {secret.type}."
-                )
-            [kv] = self.decrypt_keys(secret.encrypted_keys)
-            logger.debug("SSH key found", key_name=key_name, key_length=len(kv.value))
-            raw_value = kv.value.get_secret_value()
-            # SSH keys must end with a newline char otherwise we run into
-            # load key errors in librcrypto.
-            # https://github.com/openssl/openssl/discussions/21481
-            if not raw_value.endswith("\n"):
-                raw_value += "\n"
-            return SecretStr(raw_value)
-        except TracecatNotFoundError as e:
-            raise TracecatCredentialsNotFoundError(
-                f"SSH key {key_name} not found. Please check whether this key exists.\n\n"
-                " If not, please create a key in your workspace's credentials page and try again.",
             ) from e

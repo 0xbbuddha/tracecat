@@ -253,8 +253,9 @@ class WorkerPool:
             pids=[w.pid for w in self._workers],
         )
 
-        # Start metrics emission background task
-        self._metrics_task = asyncio.create_task(self._emit_metrics_loop())
+        # Start metrics emission background task if enabled
+        if config.TRACECAT__EXECUTOR_POOL_METRICS_ENABLED:
+            self._metrics_task = asyncio.create_task(self._emit_metrics_loop())
 
     async def _spawn_worker(self, worker_id: int) -> WorkerInfo:
         """Spawn a new worker (nsjail sandboxed or direct subprocess)."""
@@ -475,8 +476,10 @@ class WorkerPool:
                 "",
                 "# /etc from rootfs",
                 f'mount {{ src: "{rootfs}/etc" dst: "/etc" is_bind: true rw: false }}',
-                "# DNS resolution from host",
+                "# DNS/host resolution from container",
                 'mount { src: "/etc/resolv.conf" dst: "/etc/resolv.conf" is_bind: true rw: false }',
+                'mount { src: "/etc/hosts" dst: "/etc/hosts" is_bind: true rw: false }',
+                'mount { src: "/etc/nsswitch.conf" dst: "/etc/nsswitch.conf" is_bind: true rw: false }',
             ]
         )
 

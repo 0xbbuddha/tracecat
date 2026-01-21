@@ -166,6 +166,16 @@ class RecordModel(TimestampMixin, Base):
         )
 
 
+class Organization(Base, TimestampMixin):
+    """An organization in the platform."""
+
+    __tablename__ = "organization"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String, index=True)
+    slug: Mapped[str] = mapped_column(String, unique=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class OrganizationModel(RecordModel):
     """Base class for organization-scoped resources.
 
@@ -176,6 +186,12 @@ class OrganizationModel(RecordModel):
     __abstract__ = True
 
     organization_id: Mapped[OrganizationID] = mapped_column(UUID, nullable=False)
+
+
+class PlatformModel(RecordModel):
+    """Base class for platform-owned resources (not scoped to any org)."""
+
+    __abstract__ = True
 
 
 class WorkspaceModel(RecordModel):
@@ -257,6 +273,10 @@ class Workspace(OrganizationModel):
     """A workspace belonging to an organization."""
 
     __tablename__ = "workspace"
+    organization_id: Mapped[OrganizationID] = mapped_column(
+        UUID,
+        ForeignKey("organization.id", ondelete="RESTRICT"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(
         UUID,
         default=uuid.uuid4,
@@ -434,6 +454,13 @@ class BaseSecret(Base):
 
 class OrganizationSecret(OrganizationModel, BaseSecret):
     __tablename__ = "organization_secret"
+    __table_args__ = (UniqueConstraint("organization_id", "name", "environment"),)
+
+
+class PlatformSecret(PlatformModel, BaseSecret):
+    """Platform-level secrets."""
+
+    __tablename__ = "platform_secret"
     __table_args__ = (UniqueConstraint("name", "environment"),)
 
 
@@ -807,7 +834,10 @@ class Webhook(WorkspaceModel):
 
     @property
     def secret(self) -> str:
-        secret = os.getenv("TRACECAT__SIGNING_SECRET")
+        secret = (
+            os.environ.get("TRACECAT__SIGNING_SECRET")
+            or config.TRACECAT__SIGNING_SECRET
+        )
         if not secret:
             raise ValueError("TRACECAT__SIGNING_SECRET is not set")
         # Using legacy format to prevent webhook url changes
@@ -969,17 +999,17 @@ class Action(WorkspaceModel):
         return action.ref(self.title)
 
 
-class RegistryRepository(OrganizationModel):
-    """A repository of templates and actions."""
+class BaseRegistryRepository(Base):
+    """Shared fields for registry repositories."""
 
-    __tablename__ = "registry_repository"
+    __abstract__ = True
+
     id: Mapped[uuid.UUID] = mapped_column(
         UUID, default=uuid.uuid4, nullable=False, unique=True
     )
     origin: Mapped[str] = mapped_column(
         String,
         nullable=False,
-        unique=True,
         doc=(
             "Tells you where the template action was created from. Can use this to "
             "track the hierarchy of templates."
@@ -994,6 +1024,18 @@ class RegistryRepository(OrganizationModel):
         doc="The SHA of the last commit that was synced from the repository",
     )
 
+
+class RegistryRepository(OrganizationModel, BaseRegistryRepository):
+    """A repository of templates and actions."""
+
+    __tablename__ = "registry_repository"
+    __table_args__ = (UniqueConstraint("organization_id", "origin"),)
+
+    current_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID,
+        ForeignKey("registry_version.id", ondelete="SET NULL"),
+        doc="The active registry version for this repository.",
+    )
     actions: Mapped[list[RegistryAction]] = relationship(
         "RegistryAction",
         back_populates="repository",
@@ -1004,26 +1046,50 @@ class RegistryRepository(OrganizationModel):
         "RegistryVersion",
         back_populates="repository",
         cascade="all, delete",
+        foreign_keys="[RegistryVersion.repository_id]",
+    )
+    current_version: Mapped[RegistryVersion | None] = relationship(
+        "RegistryVersion",
+        foreign_keys=[current_version_id],
+        uselist=False,
     )
 
 
-class RegistryAction(OrganizationModel):
-    """A registry action.
+class PlatformRegistryRepository(PlatformModel, BaseRegistryRepository):
+    """A platform-owned repository of templates and actions."""
 
+    __tablename__ = "platform_registry_repository"
+    __table_args__ = (UniqueConstraint("origin"),)
 
-    A registry action can be a template action or a udf.
-    A udf is a python user-defined function that can be used to create new actions.
-    A template action is a reusable action that can be used to create new actions.
-    Template actions loaded from tracecat base can be cloned but not edited.
-    This is to ensure portability of templates across different users/systems.
-    Custom template actions can be edited and cloned
-
-    """
-
-    __tablename__ = "registry_action"
-    __table_args__ = (
-        UniqueConstraint("namespace", "name", name="uq_registry_action_namespace_name"),
+    current_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID,
+        ForeignKey("platform_registry_version.id", ondelete="SET NULL"),
+        doc="The active platform registry version for this repository.",
     )
+    actions: Mapped[list[PlatformRegistryAction]] = relationship(
+        "PlatformRegistryAction",
+        back_populates="repository",
+        cascade="all, delete",
+        lazy="selectin",
+    )
+    versions: Mapped[list[PlatformRegistryVersion]] = relationship(
+        "PlatformRegistryVersion",
+        back_populates="repository",
+        cascade="all, delete",
+        foreign_keys="[PlatformRegistryVersion.repository_id]",
+    )
+    current_version: Mapped[PlatformRegistryVersion | None] = relationship(
+        "PlatformRegistryVersion",
+        foreign_keys=[current_version_id],
+        uselist=False,
+    )
+
+
+class BaseRegistryAction(Base):
+    """Shared fields for registry actions."""
+
+    __abstract__ = True
+
     id: Mapped[uuid.UUID] = mapped_column(
         UUID, default=uuid.uuid4, nullable=False, unique=True
     )
@@ -1069,6 +1135,17 @@ class RegistryAction(OrganizationModel):
         nullable=True,
         doc="The action's options",
     )
+
+    @property
+    def action(self) -> str:
+        return f"{self.namespace}.{self.name}"
+
+
+class RegistryAction(OrganizationModel, BaseRegistryAction):
+    """A registry action."""
+
+    __tablename__ = "registry_action"
+    __table_args__ = (UniqueConstraint("organization_id", "namespace", "name"),)
     repository_id: Mapped[uuid.UUID] = mapped_column(
         UUID,
         ForeignKey("registry_repository.id", ondelete="CASCADE"),
@@ -1077,29 +1154,30 @@ class RegistryAction(OrganizationModel):
 
     repository: Mapped[RegistryRepository] = relationship(back_populates="actions")
 
-    @property
-    def action(self):
-        return f"{self.namespace}.{self.name}"
+
+class PlatformRegistryAction(PlatformModel, BaseRegistryAction):
+    """A platform registry action."""
+
+    __tablename__ = "platform_registry_action"
+    __table_args__ = (UniqueConstraint("namespace", "name"),)
+    repository_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("platform_registry_repository.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+
+    repository: Mapped[PlatformRegistryRepository] = relationship(
+        back_populates="actions"
+    )
 
 
-class RegistryVersion(OrganizationModel):
-    """An immutable versioned snapshot of a registry repository.
+class BaseRegistryVersion(Base):
+    """Shared fields for registry versions."""
 
-    Stores frozen manifests (index of actions and how to load them).
-    Once created, never modified. Used to pin workflows to specific
-    registry versions for reproducible execution.
-    """
-
-    __tablename__ = "registry_version"
-    __table_args__ = (UniqueConstraint("organization_id", "repository_id", "version"),)
+    __abstract__ = True
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID, default=uuid.uuid4, nullable=False, unique=True, index=True
-    )
-    repository_id: Mapped[uuid.UUID] = mapped_column(
-        UUID,
-        ForeignKey("registry_repository.id", ondelete="CASCADE"),
-        nullable=False,
     )
     version: Mapped[str] = mapped_column(
         String,
@@ -1122,7 +1200,22 @@ class RegistryVersion(OrganizationModel):
         doc="S3 URI to the compressed tarball venv for action execution",
     )
 
-    repository: Mapped[RegistryRepository] = relationship(back_populates="versions")
+
+class RegistryVersion(OrganizationModel, BaseRegistryVersion):
+    """An immutable versioned snapshot of a registry repository."""
+
+    __tablename__ = "registry_version"
+    __table_args__ = (UniqueConstraint("organization_id", "repository_id", "version"),)
+    repository_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("registry_repository.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    repository: Mapped[RegistryRepository] = relationship(
+        back_populates="versions",
+        foreign_keys=[repository_id],
+    )
     index_entries: Mapped[list[RegistryIndex]] = relationship(
         "RegistryIndex",
         back_populates="registry_version",
@@ -1131,24 +1224,39 @@ class RegistryVersion(OrganizationModel):
     )
 
 
-class RegistryIndex(OrganizationModel):
-    """Index of actions from a RegistryVersion manifest for fast lookups.
+class PlatformRegistryVersion(PlatformModel, BaseRegistryVersion):
+    """A platform-owned versioned snapshot of a registry repository."""
 
-    Derived from RegistryVersion.manifest - provides fast action lookups
-    for UI display and workflow validation. Equivalent to today's RegistryAction
-    but scoped to a specific version.
-    """
+    __tablename__ = "platform_registry_version"
+    __table_args__ = (
+        UniqueConstraint("id"),
+        UniqueConstraint("repository_id", "version"),
+    )
+    repository_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("platform_registry_repository.id", ondelete="CASCADE"),
+        nullable=False,
+    )
 
-    __tablename__ = "registry_index"
-    __table_args__ = (UniqueConstraint("registry_version_id", "namespace", "name"),)
+    repository: Mapped[PlatformRegistryRepository] = relationship(
+        back_populates="versions",
+        foreign_keys=[repository_id],
+    )
+    index_entries: Mapped[list[PlatformRegistryIndex]] = relationship(
+        "PlatformRegistryIndex",
+        back_populates="registry_version",
+        cascade="all, delete",
+        lazy="selectin",
+    )
+
+
+class BaseRegistryIndex(Base):
+    """Shared fields for registry indexes."""
+
+    __abstract__ = True
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID, default=uuid.uuid4, nullable=False, unique=True, index=True
-    )
-    registry_version_id: Mapped[uuid.UUID] = mapped_column(
-        UUID,
-        ForeignKey("registry_version.id", ondelete="CASCADE"),
-        nullable=False,
     )
     namespace: Mapped[str] = mapped_column(String, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String, nullable=False, index=True)
@@ -1190,19 +1298,51 @@ class RegistryIndex(OrganizationModel):
         doc="Action options",
     )
 
+    @property
+    def action(self) -> str:
+        return f"{self.namespace}.{self.name}"
+
+
+class RegistryIndex(OrganizationModel, BaseRegistryIndex):
+    """Index of actions from a RegistryVersion manifest for fast lookups."""
+
+    __tablename__ = "registry_index"
+    __table_args__ = (UniqueConstraint("registry_version_id", "namespace", "name"),)
+    registry_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("registry_version.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
     registry_version: Mapped[RegistryVersion] = relationship(
         back_populates="index_entries"
     )
 
-    @property
-    def action(self) -> str:
-        return f"{self.namespace}.{self.name}"
+
+class PlatformRegistryIndex(PlatformModel, BaseRegistryIndex):
+    """Platform index of actions from a registry manifest."""
+
+    __tablename__ = "platform_registry_index"
+    __table_args__ = (
+        UniqueConstraint("id"),
+        UniqueConstraint("registry_version_id", "namespace", "name"),
+    )
+    registry_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("platform_registry_version.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    registry_version: Mapped[PlatformRegistryVersion] = relationship(
+        back_populates="index_entries"
+    )
 
 
 class OrganizationSetting(OrganizationModel):
     """An organization setting."""
 
     __tablename__ = "organization_settings"
+    __table_args__ = (UniqueConstraint("organization_id", "key"),)
     id: Mapped[uuid.UUID] = mapped_column(
         UUID,
         default=uuid.uuid4,
@@ -1213,7 +1353,6 @@ class OrganizationSetting(OrganizationModel):
     key: Mapped[str] = mapped_column(
         String,
         nullable=False,
-        unique=True,
         index=True,
         doc="A unique key that identifies the setting",
     )
@@ -1229,6 +1368,19 @@ class OrganizationSetting(OrganizationModel):
         default=False,
         server_default=text("false"),
         doc="Whether the setting is encrypted",
+    )
+
+
+class PlatformSetting(Base, TimestampMixin):
+    """A platform-level setting (not scoped to any organization)."""
+
+    __tablename__ = "platform_settings"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    key: Mapped[str] = mapped_column(String, unique=True, index=True)
+    value: Mapped[bytes] = mapped_column(LargeBinary)
+    value_type: Mapped[str] = mapped_column(String)
+    is_encrypted: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
     )
 
 
@@ -1753,11 +1905,12 @@ class Approval(WorkspaceModel):
         index=True,
         doc="Unique approval identifier",
     )
-    session_id: Mapped[uuid.UUID] = mapped_column(
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID,
-        nullable=False,
+        ForeignKey("agent_session.id", ondelete="SET NULL"),
+        nullable=True,
         index=True,
-        doc="Agent session identifier",
+        doc="Agent session identifier (FK to agent_session.id)",
     )
     tool_call_id: Mapped[str] = mapped_column(
         String,
@@ -1801,6 +1954,149 @@ class Approval(WorkspaceModel):
     )
     approved_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
+    )
+
+
+class AgentSession(WorkspaceModel):
+    """Generic agent session/thread entity (harness-agnostic).
+
+    Represents an agent execution session that can be backed by different harnesses
+    (pydantic_ai, claude_code, etc.). This is the primary entity for all agent
+    interactions - both chat UI and workflow-initiated.
+
+    Replaces the legacy Chat model for new conversations.
+    """
+
+    __tablename__ = "agent_session"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        default=uuid.uuid4,
+        unique=True,
+        index=True,
+        doc="Session identifier (matches RunAgentArgs.session_id)",
+    )
+    title: Mapped[str] = mapped_column(
+        String(200),
+        default="New Chat",
+        nullable=False,
+        doc="Human-readable title for the session",
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID,
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=True,
+        doc="User who created this session (nullable for workflow-initiated sessions)",
+    )
+    entity_type: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        index=True,
+        doc="The entity type this session is associated with (case, agent_preset, workflow, etc.)",
+    )
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        nullable=False,
+        doc="The ID of the associated entity",
+    )
+    tools: Mapped[list[str] | None] = mapped_column(
+        JSONB,
+        default=None,
+        nullable=True,
+        doc="The tools available to the agent for this session",
+    )
+    agent_preset_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID,
+        ForeignKey("agent_preset.id", ondelete="SET NULL"),
+        nullable=True,
+        doc="Agent preset used for this session (if any)",
+    )
+    # Agent harness fields
+    harness_type: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        doc="Agent harness type: 'pydantic_ai', 'claude_code', or None for legacy",
+    )
+    # Claude SDK session tracking (for resume)
+    sdk_session_id: Mapped[str | None] = mapped_column(
+        String(120),
+        nullable=True,
+        doc="Claude SDK internal session ID (for JSONL file naming on resume)",
+    )
+    # Current workflow run tracking (for approval continuation)
+    curr_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID,
+        nullable=True,
+        index=True,
+        doc="Current workflow run ID - used to construct workflow handle for approvals",
+    )
+    # Stream position tracking (for resuming from last event)
+    last_stream_id: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        doc="Last processed Redis stream ID - used to resume streaming from correct position",
+    )
+    # Parent session for forked sessions (approval continuations)
+    parent_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID,
+        ForeignKey("agent_session.id", ondelete="SET NULL", use_alter=True),
+        nullable=True,
+        index=True,
+        doc="Parent session ID for forked sessions (e.g., approval continuations)",
+    )
+
+    # Relationships
+    creator: Mapped[User | None] = relationship("User")
+    parent_session: Mapped[AgentSession | None] = relationship(
+        "AgentSession",
+        remote_side=[id],
+        foreign_keys=[parent_session_id],
+    )
+    history: Mapped[list[AgentSessionHistory]] = relationship(
+        "AgentSessionHistory",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="AgentSessionHistory.surrogate_id",
+    )
+
+
+class AgentSessionHistory(WorkspaceModel):
+    """Harness-agnostic history storage for agent sessions.
+
+    Each row represents one message in the session. Ordered by created_at.
+    """
+
+    __tablename__ = "agent_session_history"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        default=uuid.uuid4,
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("agent_session.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    content: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        doc="Harness-specific message content",
+    )
+    kind: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="internal",
+        index=True,
+        doc="Message kind for filtering (chat-message, internal). Default to internal - only user/assistant messages explicitly marked visible.",
+    )
+
+    session: Mapped[AgentSession] = relationship(
+        "AgentSession",
+        back_populates="history",
     )
 
 

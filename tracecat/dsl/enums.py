@@ -8,6 +8,7 @@ class PlatformAction(StrEnum):
     AI_AGENT = "ai.agent"
     AI_PRESET_AGENT = "ai.preset_agent"
     AI_ACTION = "ai.action"
+    RUN_PYTHON = "core.script.run_python"
 
     @classmethod
     def is_streamable(cls, action: str) -> bool:
@@ -17,10 +18,29 @@ class PlatformAction(StrEnum):
             cls.AI_ACTION,
         )
 
+    @classmethod
+    def interface_actions(cls) -> frozenset[str]:
+        return frozenset(
+            (
+                cls.CHILD_WORKFLOW_EXECUTE,
+                cls.TRANSFORM_SCATTER,
+                cls.TRANSFORM_GATHER,
+                cls.AI_AGENT,
+                cls.AI_PRESET_AGENT,
+                cls.RUN_PYTHON,
+            )
+        )
+
+    @classmethod
+    def is_interface(cls, action: str) -> bool:
+        return action in cls.interface_actions()
+
 
 class FailStrategy(StrEnum):
     ISOLATED = "isolated"
+    """If any fails, only the failed one will fail."""
     ALL = "all"
+    """If any fails, all will fail."""
 
 
 class LoopStrategy(StrEnum):

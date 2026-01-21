@@ -1,17 +1,27 @@
-"""Service for computing and managing registry version locks."""
+"""Service for resolving and managing registry version locks."""
 
 from __future__ import annotations
 
+from collections import deque
+
 from sqlalchemy import select
 
-from tracecat import config
-from tracecat.db.models import RegistryRepository, RegistryVersion
+from tracecat.db.models import (
+    PlatformRegistryRepository,
+    PlatformRegistryVersion,
+    RegistryRepository,
+    RegistryVersion,
+)
+from tracecat.dsl.enums import PlatformAction
+from tracecat.exceptions import RegistryError
+from tracecat.registry.actions.schemas import RegistryActionImplValidator
 from tracecat.registry.lock.types import RegistryLock
+from tracecat.registry.versions.schemas import RegistryVersionManifest
 from tracecat.service import BaseService
 
 
 class RegistryLockService(BaseService):
-    """Service for computing and managing registry version locks.
+    """Service for resolving and managing registry version locks.
 
     Registry locks map repository origins to specific version strings,
     allowing workflows to pin their dependent registry versions for
@@ -20,80 +30,145 @@ class RegistryLockService(BaseService):
 
     service_name = "registry_lock"
 
-    async def get_latest_versions_lock(self) -> RegistryLock:
-        """Get lock mapping each repository origin to its latest version.
-
-        Queries all RegistryRepositories and finds the most recent
-        RegistryVersion for each (by created_at, with id as tiebreaker).
-
-        Returns:
-            RegistryLock: Maps origin -> version string.
-            Example: {"tracecat_registry": "2024.12.10.123456", "git+ssh://...": "abc1234"}
-            Returns empty dict if no versions exist.
-        """
-        # Use PostgreSQL DISTINCT ON to get exactly one row per repository,
-        # ordered by created_at DESC, id DESC for deterministic tiebreaking
-        statement = (
-            select(RegistryRepository.origin, RegistryVersion.version)
-            .join(
-                RegistryVersion,
-                RegistryVersion.repository_id == RegistryRepository.id,
-            )
-            .where(
-                RegistryRepository.organization_id == config.TRACECAT__DEFAULT_ORG_ID,
-                RegistryVersion.organization_id == config.TRACECAT__DEFAULT_ORG_ID,
-            )
-            .distinct(RegistryVersion.repository_id)
-            .order_by(
-                RegistryVersion.repository_id,
-                RegistryVersion.created_at.desc(),
-                RegistryVersion.id.desc(),
-            )
-        )
-
-        result = await self.session.execute(statement)
-        rows = result.all()
-
-        lock: RegistryLock = {str(origin): str(version) for origin, version in rows}
-
-        self.logger.debug("Computed latest versions lock", num_repos=len(lock))
-
-        return lock
-
-    async def get_version_lock_for_repositories(
+    async def resolve_lock_with_bindings(
         self,
-        repository_ids: list[str],
+        action_names: set[str],
     ) -> RegistryLock:
-        """Get lock for specific repositories only.
+        """Resolve registry lock with action-level bindings.
+
+        For each action in the workflow, determines which registry origin
+        contains it and builds a mapping for O(1) resolution at execution time.
+
+        This method recursively discovers template step actions, ensuring all
+        actions needed for execution (including nested template steps) are
+        included in the lock.
+
+        Actions are resolved from both platform registries (globally shared)
+        and organization registries. Organization registries take precedence
+        when the same origin exists in both.
 
         Args:
-            repository_ids: List of repository IDs to get versions for
+            action_names: Top-level action names used in the workflow
 
         Returns:
-            RegistryLock: Maps origin -> version string for requested repos.
-        """
-        if not repository_ids:
-            return {}
+            RegistryLock with origins and action bindings for all actions
 
-        # Use PostgreSQL DISTINCT ON to get exactly one row per repository,
-        # ordered by created_at DESC, id DESC for deterministic tiebreaking
-        statement = (
-            select(RegistryRepository.origin, RegistryVersion.version)
+        Raises:
+            RegistryError: If an action is not found in any registry or is ambiguous
+            RegistryError: If a repository has no current_version_id set
+        """
+        # 1. Query platform registries via current_version_id
+        platform_statement = (
+            select(
+                PlatformRegistryRepository.origin,
+                PlatformRegistryVersion.version,
+                PlatformRegistryVersion.manifest,
+            )
             .join(
-                RegistryVersion,
-                RegistryVersion.repository_id == RegistryRepository.id,
+                PlatformRegistryVersion,
+                PlatformRegistryRepository.current_version_id
+                == PlatformRegistryVersion.id,
             )
             .where(
-                RegistryVersion.organization_id == config.TRACECAT__DEFAULT_ORG_ID,
-                RegistryVersion.repository_id.in_(repository_ids),
-            )
-            .distinct(RegistryVersion.repository_id)
-            .order_by(
-                RegistryVersion.repository_id,
-                RegistryVersion.created_at.desc(),
-                RegistryVersion.id.desc(),
+                PlatformRegistryRepository.current_version_id.is_not(None),
             )
         )
+        platform_result = await self.session.execute(platform_statement)
+        platform_rows = platform_result.tuples().all()
 
-        result = await self.session.execute(statement)
-        return {str(origin): str(version) for origin, version in result.all()}
+        # 2. Query org registries via current_version_id
+        org_statement = (
+            select(
+                RegistryRepository.origin,
+                RegistryVersion.version,
+                RegistryVersion.manifest,
+            )
+            .join(
+                RegistryVersion,
+                RegistryRepository.current_version_id == RegistryVersion.id,
+            )
+            .where(
+                RegistryRepository.organization_id == self.organization_id,
+                RegistryRepository.current_version_id.is_not(None),
+            )
+        )
+        org_result = await self.session.execute(org_statement)
+        org_rows = org_result.tuples().all()
+
+        # 3. Combine: platform first, then org (org overrides for same origin)
+        rows = list(platform_rows) + list(org_rows)
+
+        # 2. Build origins dict and parse manifests
+        origins: dict[str, str] = {}
+        origin_manifests: dict[str, RegistryVersionManifest] = {}
+
+        for origin, version, manifest_dict in rows:
+            origin_str = str(origin)
+            origins[origin_str] = str(version)
+            origin_manifests[origin_str] = RegistryVersionManifest.model_validate(
+                manifest_dict
+            )
+
+        # 3. Build action -> origin mapping using BFS to include template step actions
+        actions: dict[str, str] = {}
+        queue: deque[str] = deque(sorted(action_names))
+
+        while queue:
+            action_name = queue.popleft()
+
+            # Skip if already resolved
+            if action_name in actions:
+                continue
+
+            matching_origins: list[str] = []
+            for origin_str, manifest in origin_manifests.items():
+                if action_name in manifest.actions:
+                    matching_origins.append(origin_str)
+
+            if len(matching_origins) == 0:
+                raise RegistryError(
+                    f"Action '{action_name}' not found in any registry. "
+                    f"Available registries: {list(origins.keys())}"
+                )
+            if len(matching_origins) > 1:
+                raise RegistryError(
+                    f"Ambiguous action '{action_name}' found in multiple registries: "
+                    f"{matching_origins}. Please specify the registry explicitly."
+                )
+
+            resolved_origin = matching_origins[0]
+            actions[action_name] = resolved_origin
+
+            # If this is a template action, add its step actions to the queue
+            manifest = origin_manifests[resolved_origin]
+            manifest_action = manifest.actions.get(action_name)
+            if manifest_action is not None:
+                impl = RegistryActionImplValidator.validate_python(
+                    manifest_action.implementation
+                )
+                if impl.type == "template" and impl.template_action is not None:
+                    for step in impl.template_action.definition.steps:
+                        if PlatformAction.is_interface(step.action):
+                            raise RegistryError(
+                                f"Template action '{action_name}' contains step '{step.ref}' using "
+                                f"platform action '{step.action}'. Platform actions cannot be used "
+                                f"inside templates - use them directly in workflows instead."
+                            )
+                        if step.action not in actions:
+                            queue.append(step.action)
+
+        # Only keep origins that are actually needed for the resolved actions.
+        used_origins = set(actions.values())
+        origins = {
+            origin: version
+            for origin, version in origins.items()
+            if origin in used_origins
+        }
+
+        self.logger.debug(
+            "Resolved lock with bindings",
+            num_origins=len(origins),
+            num_actions=len(actions),
+        )
+
+        return RegistryLock(origins=origins, actions=actions)

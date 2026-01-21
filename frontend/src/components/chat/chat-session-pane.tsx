@@ -19,7 +19,12 @@ import {
 } from "lucide-react"
 import { motion } from "motion/react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import type { ApprovalDecision, ChatEntity, ChatReadVercel } from "@/client"
+import type {
+  AgentSessionEntity,
+  AgentSessionReadVercel,
+  ApprovalDecision,
+  ChatReadVercel,
+} from "@/client"
 import { Action, Actions } from "@/components/ai-elements/actions"
 import {
   Conversation,
@@ -84,9 +89,9 @@ import {
 import { cn } from "@/lib/utils"
 
 export interface ChatSessionPaneProps {
-  chat: ChatReadVercel
+  chat: AgentSessionReadVercel | ChatReadVercel
   workspaceId: string
-  entityType?: ChatEntity
+  entityType?: AgentSessionEntity
   entityId?: string
   className?: string
   placeholder?: string
@@ -95,6 +100,23 @@ export interface ChatSessionPaneProps {
   toolsEnabled?: boolean
   /** Autofocus the prompt input when the pane mounts. */
   autoFocusInput?: boolean
+  /**
+   * Called before sending a message. If provided, receives the message text
+   * and should handle sending it (e.g., to a forked session). Returns the
+   * new session ID to switch to, or null to cancel.
+   * Used for inbox fork-on-send behavior.
+   */
+  onBeforeSend?: (messageText: string) => Promise<string | null>
+  /**
+   * Message to send immediately on mount. Used after forking a session
+   * to send the user's message to the newly forked session.
+   */
+  pendingMessage?: string
+  /**
+   * Callback when the pending message has been sent.
+   * Used to clear the pending message state in the parent.
+   */
+  onPendingMessageSent?: () => void
 }
 
 export function ChatSessionPane({
@@ -108,6 +130,9 @@ export function ChatSessionPane({
   modelInfo,
   toolsEnabled = true,
   autoFocusInput = false,
+  onBeforeSend,
+  pendingMessage,
+  onPendingMessageSent,
 }: ChatSessionPaneProps) {
   const queryClient = useQueryClient()
   const processedMessageRef = useRef<
@@ -121,6 +146,9 @@ export function ChatSessionPane({
   const [input, setInput] = useState<string>("")
   const [toolsDialogOpen, setToolsDialogOpen] = useState(false)
 
+  // Check if this is a legacy read-only session
+  const isReadonly = "is_readonly" in chat && chat.is_readonly === true
+
   const uiMessages = useMemo(
     () => (chat?.messages || []).map(toUIMessage),
     [chat?.messages]
@@ -132,6 +160,25 @@ export function ChatSessionPane({
       messages: uiMessages,
       modelInfo,
     })
+
+  // Track whether we've sent the pending message to avoid double-sends
+  const pendingMessageSentRef = useRef(false)
+
+  // Send pending message on mount (used after forking)
+  useEffect(() => {
+    if (pendingMessage && !pendingMessageSentRef.current && !isReadonly) {
+      pendingMessageSentRef.current = true
+      clearError()
+      sendMessage({ text: pendingMessage })
+      onPendingMessageSent?.()
+    }
+  }, [
+    pendingMessage,
+    isReadonly,
+    clearError,
+    sendMessage,
+    onPendingMessageSent,
+  ])
 
   const isWaitingForResponse = useMemo(() => {
     if (status === "submitted") return true
@@ -232,23 +279,37 @@ export function ChatSessionPane({
     }
   }, [messages, invalidateEntityQueries])
 
-  const handleSubmit = (message: PromptInputMessage) => {
+  const handleSubmit = async (message: PromptInputMessage) => {
     const hasText = Boolean(message.text?.trim())
 
     if (!hasText) {
       return
     }
 
+    const messageText = message.text || ""
+
+    if (onBeforeSend) {
+      const result = await onBeforeSend(messageText)
+      // Only clear input if onBeforeSend succeeded (non-null)
+      // If null, the action was cancelled and user keeps their draft
+      if (result !== null) {
+        setInput("")
+      }
+      // Parent will handle switching sessions and sending via pendingMessage
+      return
+    }
+
+    // Clear input for normal message sending
+    setInput("")
+
     try {
       clearError()
       sendMessage({
-        text: message.text || "Sent with attachments",
+        text: messageText,
         ...(message.files?.length ? { files: message.files } : {}),
       })
     } catch (error) {
       console.error("Failed to send message:", error)
-    } finally {
-      setInput("")
     }
   }
 
@@ -354,13 +415,18 @@ export function ChatSessionPane({
           <PromptInputBody>
             <PromptInputTextarea
               onChange={(event) => setInput(event.target.value)}
-              placeholder={placeholder}
+              placeholder={
+                isReadonly
+                  ? "This is a legacy session (read-only)"
+                  : placeholder
+              }
               value={input}
-              autoFocus={autoFocusInput}
+              autoFocus={autoFocusInput && !isReadonly}
+              disabled={isReadonly}
             />
           </PromptInputBody>
           <PromptInputToolbar>
-            {toolsEnabled && (
+            {toolsEnabled && !isReadonly && (
               <PromptInputTools>
                 <TooltipProvider delayDuration={0}>
                   <Tooltip>
@@ -371,6 +437,7 @@ export function ChatSessionPane({
                         onClick={() => setToolsDialogOpen(true)}
                         className="h-7 gap-1 px-2"
                         variant="ghost"
+                        disabled={!!status}
                       >
                         <HammerIcon className="size-4" />
                         <span className="text-xs">Tools</span>
@@ -384,13 +451,13 @@ export function ChatSessionPane({
               </PromptInputTools>
             )}
             <PromptInputSubmit
-              disabled={!input && !status}
+              disabled={isReadonly || !input || !!status}
               status={status}
               className="ml-auto text-muted-foreground/80"
             />
           </PromptInputToolbar>
         </PromptInput>
-        {toolsEnabled && (
+        {toolsEnabled && !isReadonly && (
           <ChatToolsDialog
             chatId={chat.id}
             open={toolsDialogOpen}

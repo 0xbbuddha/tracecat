@@ -33,16 +33,21 @@ from tracecat.contexts import (
 from tracecat.executor.action_runner import get_action_runner
 from tracecat.executor.backends.base import ExecutorBackend
 from tracecat.executor.schemas import (
+    ActionImplementation,
     ExecutorActionErrorInfo,
     ExecutorResult,
     ExecutorResultFailure,
     ExecutorResultSuccess,
     ResolvedContext,
 )
-from tracecat.executor.service import run_single_action
-from tracecat.expressions.common import ExprContext
+from tracecat.executor.service import (
+    RegistryArtifactsContext,
+    get_registry_artifacts_for_lock,
+)
 from tracecat.logger import logger
-from tracecat.registry.actions.service import RegistryActionsService
+from tracecat.registry.actions.schemas import RegistryActionUDFImpl
+from tracecat.registry.constants import DEFAULT_REGISTRY_ORIGIN
+from tracecat.registry.loaders import load_udf_impl
 from tracecat.secrets import secrets_manager
 
 if TYPE_CHECKING:
@@ -94,7 +99,7 @@ class DirectBackend(ExecutorBackend):
     For production use pool (single-tenant) or ephemeral (multi-tenant).
     """
 
-    async def execute(
+    async def _execute(
         self,
         input: RunActionInput,
         role: Role,
@@ -114,14 +119,8 @@ class DirectBackend(ExecutorBackend):
             task_ref=input.task.ref,
         )
 
-        # Get tarball paths from the action runner's cache
-        tarball_paths: list[str] = []
-        runner = get_action_runner()
-        cache_dir = runner.cache_dir
-        if cache_dir.exists():
-            for path in cache_dir.iterdir():
-                if path.is_dir() and path.name.startswith("tarball-"):
-                    tarball_paths.append(str(path))
+        # Download and extract tarballs for custom registries
+        tarball_paths = await self._ensure_registry_tarballs(input, role)
 
         if tarball_paths:
             logger.debug(
@@ -171,6 +170,10 @@ class DirectBackend(ExecutorBackend):
         Uses resolved_context.action_impl to determine what to execute.
         This allows the backend to execute any action, not just the one
         specified in input.task.action (important for template step execution).
+
+        NOTE: This backend executes UDFs directly without DB lookup.
+        Templates are orchestrated by the service layer (_execute_template_action);
+        only UDF leaf nodes reach this backend.
         """
         action_impl = resolved_context.action_impl
 
@@ -209,20 +212,14 @@ class DirectBackend(ExecutorBackend):
         )
         set_context(registry_ctx)
 
-        # Load action implementation using module/name from resolved_context
-        # This allows executing the correct action for template steps
-        action = await self._load_action_from_impl(action_impl)
+        # Load UDF directly from module/name (no DB lookup)
+        fn = self._load_udf_callable(action_impl)
 
         log.info(
             "Run action",
             task_ref=input.task.ref,
             action_name=action_name,
         )
-
-        # Build execution context with pre-resolved secrets and variables
-        context = input.exec_context.copy()
-        context[ExprContext.SECRETS] = resolved_context.secrets
-        context[ExprContext.VARS] = resolved_context.variables
 
         # Flatten secrets for env sandbox
         flattened_secrets = secrets_manager.flatten_secrets(resolved_context.secrets)
@@ -234,11 +231,11 @@ class DirectBackend(ExecutorBackend):
             # Execute with secrets in environment
             args = resolved_context.evaluated_args or {}
             with secrets_manager.env_sandbox(flattened_secrets):
-                result = await run_single_action(
-                    action=action,
-                    args=args,
-                    context=context,
-                )
+                # Execute the UDF directly
+                if asyncio.iscoroutinefunction(fn):
+                    result = await fn(**args)
+                else:
+                    result = await asyncio.to_thread(fn, **args)
 
             log.trace("Result", result=result)
             return result
@@ -246,26 +243,112 @@ class DirectBackend(ExecutorBackend):
             # Reset secrets context to prevent leakage
             registry_secrets.reset_context(secrets_token)
 
-    async def _load_action_from_impl(self, action_impl) -> Any:
-        """Load the action implementation from action_impl metadata.
+    def _load_udf_callable(self, action_impl: ActionImplementation):
+        """Load the UDF callable from action_impl metadata.
 
-        Uses the module and name from action_impl to load the correct
-        action, regardless of what's in input.task.action.
+        Uses the module and name from action_impl to import and return
+        the function, without any DB lookup. The origin is used for
+        local-reload behavior when TRACECAT__LOCAL_REPOSITORY_ENABLED is set.
         """
-        async with RegistryActionsService.with_session() as service:
-            # Fast path: load by registry action name when provided.
-            if action_impl.action_name:
-                reg_action = await service.get_action(action_impl.action_name)
-                return service.get_bound(reg_action, mode="execution")
-
-            # Fallback: resolve via implementation metadata (slower JSONB scan).
-            if not action_impl.module or not action_impl.name:
-                raise ValueError(
-                    "UDF action missing module or name: "
-                    f"module={action_impl.module}, name={action_impl.name}"
-                )
-            reg_action = await service.get_action_by_impl(
-                module=action_impl.module,
-                name=action_impl.name,
+        if not action_impl.module or not action_impl.name:
+            raise ValueError(
+                "UDF action missing module or name: "
+                f"module={action_impl.module}, name={action_impl.name}"
             )
-            return service.get_bound(reg_action, mode="execution")
+
+        # Create a RegistryActionUDFImpl to use with load_udf_impl
+        # The url field is required but only used for logging; use origin
+        udf_impl = RegistryActionUDFImpl(
+            type="udf",
+            url=action_impl.origin or "unknown",
+            module=action_impl.module,
+            name=action_impl.name,
+        )
+        return load_udf_impl(udf_impl)
+
+    async def _ensure_registry_tarballs(
+        self, input: RunActionInput, role: Role
+    ) -> list[str]:
+        """Download and extract registry tarballs, returning paths to add to sys.path.
+
+        This ensures custom registry modules are available for in-process execution.
+        Uses ActionRunner to handle downloading and caching.
+
+        Args:
+            input: The RunActionInput containing registry_lock with origin versions.
+
+        Returns:
+            List of extracted tarball directory paths to add to sys.path.
+        """
+        if config.TRACECAT__LOCAL_REPOSITORY_ENABLED:
+            return []
+
+        # Get tarball URIs for all origins in the registry lock
+        tarball_uris = await self._get_tarball_uris(input, role)
+        if not tarball_uris:
+            logger.debug("No tarball URIs found, using empty paths")
+            return []
+
+        # Download and extract each tarball using ActionRunner
+        runner = get_action_runner()
+        extracted_paths: list[str] = []
+
+        for tarball_uri in tarball_uris:
+            try:
+                extracted_path = await runner.ensure_registry_environment(tarball_uri)
+                if extracted_path:
+                    extracted_paths.append(str(extracted_path))
+            except Exception as e:
+                logger.warning(
+                    "Failed to extract tarball for direct execution",
+                    tarball_uri=tarball_uri,
+                    error=str(e),
+                )
+
+        logger.debug(
+            "Extracted registry tarballs for direct execution",
+            count=len(extracted_paths),
+        )
+        return extracted_paths
+
+    async def _get_tarball_uris(self, input: RunActionInput, role: Role) -> list[str]:
+        """Get tarball URIs for registry environment (deterministic ordering).
+
+        Args:
+            input: The RunActionInput containing task and execution context
+
+        Returns:
+            List of tarball URIs in deterministic order (tracecat_registry first,
+            then lexicographically by origin).
+        """
+        try:
+            artifacts = await get_registry_artifacts_for_lock(
+                input.registry_lock.origins, role.organization_id
+            )
+            return self._sort_tarball_uris(artifacts)
+        except Exception as e:
+            logger.warning(
+                "Failed to load registry artifacts for direct execution",
+                error=str(e),
+            )
+            return []
+
+    def _sort_tarball_uris(
+        self, artifacts: list[RegistryArtifactsContext]
+    ) -> list[str]:
+        """Sort tarballs: tracecat_registry first, then lexicographically by origin."""
+        builtin_uris: list[str] = []
+        other_uris: list[tuple[str, str]] = []  # (origin, uri)
+
+        for artifact in artifacts:
+            if not artifact.tarball_uri:
+                continue
+            if artifact.origin == DEFAULT_REGISTRY_ORIGIN:
+                builtin_uris.append(artifact.tarball_uri)
+            else:
+                other_uris.append((artifact.origin, artifact.tarball_uri))
+
+        # Sort non-builtin by origin lexicographically
+        other_uris.sort(key=lambda x: x[0])
+
+        return builtin_uris + [uri for _, uri in other_uris]

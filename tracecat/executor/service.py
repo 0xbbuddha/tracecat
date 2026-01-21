@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import aliased
+from aiocache import Cache
+from sqlalchemy import and_, or_, select
 
 from tracecat import config
 from tracecat.auth.executor_tokens import mint_executor_token
@@ -19,16 +18,17 @@ from tracecat.contexts import (
     ctx_interaction,
     ctx_logical_time,
     ctx_role,
-    with_session,
 )
 from tracecat.db.engine import get_async_session_context_manager
 from tracecat.db.models import RegistryRepository, RegistryVersion
 from tracecat.dsl.common import context_locator, create_default_execution_context
 from tracecat.dsl.schemas import (
     ActionStatement,
+    DSLEnvironment,
     ExecutionContext,
     RunActionInput,
     TaskResult,
+    TemplateExecutionContext,
 )
 from tracecat.exceptions import (
     ExecutionError,
@@ -36,10 +36,9 @@ from tracecat.exceptions import (
     TracecatAuthorizationError,
     TracecatException,
 )
-from tracecat.executor.action_runner import get_action_runner
+from tracecat.executor import registry_resolver
 from tracecat.executor.backends.base import ExecutorBackend
 from tracecat.executor.schemas import (
-    ActionImplementation,
     ExecutorActionErrorInfo,
     ExecutorResultSuccess,
     ResolvedContext,
@@ -50,26 +49,16 @@ from tracecat.expressions.eval import (
     eval_templated_object,
     get_iterables_from_expression,
 )
+from tracecat.identifiers import OrganizationID
 from tracecat.logger import logger
 from tracecat.parse import traverse_leaves
 from tracecat.registry.actions.bound import BoundRegistryAction
-from tracecat.registry.actions.schemas import (
-    RegistryActionImplValidator,
-    TemplateActionDefinition,
-)
+from tracecat.registry.actions.schemas import TemplateActionDefinition
 from tracecat.registry.actions.service import RegistryActionsService
 from tracecat.secrets import secrets_manager
 from tracecat.secrets.common import apply_masks_object
 from tracecat.variables.schemas import VariableSearch
 from tracecat.variables.service import VariablesService
-
-try:
-    from tracecat_registry import secrets as registry_secrets
-    from tracecat_registry.context import RegistryContext, set_context
-except ImportError:
-    RegistryContext = None  # type: ignore[misc, assignment]
-    set_context = None  # type: ignore[assignment]
-    registry_secrets = None  # type: ignore[assignment]
 
 """All these methods are used in the registry executor, not on the worker"""
 
@@ -90,131 +79,107 @@ class RegistryArtifactsContext:
     tarball_uri: str
 
 
-_registry_artifacts_cache: dict[str, tuple[float, list[RegistryArtifactsContext]]] = {}
+# Cache for individual artifacts (origin, version) -> RegistryArtifactsContext
+_artifact_cache = Cache(Cache.MEMORY, ttl=60)
 
 
-async def get_registry_artifacts_cached(role: Role) -> list[RegistryArtifactsContext]:
-    """Get latest registry tarball URIs, cached per workspace.
-
-    Uses a simple TTL cache. No locking - if multiple concurrent requests
-    hit an expired cache, they'll all query the DB (harmless duplicate work).
-    """
-    cache_key = str(role.workspace_id)
-    if cached := _registry_artifacts_cache.get(cache_key):
-        expire_time, artifacts = cached
-        if time.time() < expire_time:
-            return artifacts
-
-    # Cache miss or expired - fetch from DB
-    logger.info("Querying latest registry artifacts from DB", cache_key=cache_key)
-    async with (
-        get_async_session_context_manager() as session,
-        with_session(session=session),
-    ):
-        subq = (
-            select(
-                RegistryVersion.repository_id,
-                func.max(RegistryVersion.created_at).label("max_created_at"),
-            )
-            .where(RegistryVersion.organization_id == config.TRACECAT__DEFAULT_ORG_ID)
-            .group_by(RegistryVersion.repository_id)
-            .subquery()
-        )
-        rv_alias = aliased(RegistryVersion)
-        statement = (
-            select(
-                RegistryRepository.origin,
-                rv_alias.version,
-                rv_alias.tarball_uri,
-            )
-            .join(subq, RegistryRepository.id == subq.c.repository_id)
-            .join(
-                rv_alias,
-                (rv_alias.repository_id == subq.c.repository_id)
-                & (rv_alias.created_at == subq.c.max_created_at),
-            )
-            .where(
-                RegistryRepository.organization_id == config.TRACECAT__DEFAULT_ORG_ID
-            )
-        )
-        result = await session.execute(statement)
-        artifacts = [
-            RegistryArtifactsContext(
-                origin=str(origin),
-                version=str(version),
-                tarball_uri=str(tarball_uri),
-            )
-            for origin, version, tarball_uri in result.all()
-            if tarball_uri is not None
-        ]
-
-    logger.info(
-        "Fetched registry artifacts and updating cache",
-        count=len(artifacts),
-        cache_key=cache_key,
-    )
-    _registry_artifacts_cache[cache_key] = (time.time() + 60, artifacts)
-    return artifacts
+def _artifact_cache_key(
+    origin: str, version: str, organization_id: OrganizationID
+) -> str:
+    return f"artifact:{organization_id}:{origin}:{version}"
 
 
 async def get_registry_artifacts_for_lock(
-    registry_lock: dict[str, str],
+    origins: dict[str, str],
+    organization_id: OrganizationID,
 ) -> list[RegistryArtifactsContext]:
     """Get registry tarball URIs for specific locked versions.
 
+    Uses per-artifact caching - only queries DB for cache misses (batched).
+
     Args:
-        registry_lock: Maps origin -> version string.
+        origins: Maps origin -> version string from RegistryLock["origins"].
             Example: {"tracecat_registry": "2024.12.10.123456", "git+ssh://...": "abc1234"}
+        organization_id: The organization ID for scoping the registry lookup.
 
     Returns:
         List of RegistryArtifactsContext for the locked versions.
     """
-    if not registry_lock:
+    if not origins:
         return []
 
-    async with (
-        get_async_session_context_manager() as session,
-        with_session(session=session),
-    ):
-        artifacts: list[RegistryArtifactsContext] = []
+    # Check cache for each origin/version
+    cached_artifacts: list[RegistryArtifactsContext] = []
+    misses: list[tuple[str, str]] = []
 
-        for origin, version in registry_lock.items():
-            # Query for the specific version
-            statement = (
-                select(
-                    RegistryRepository.origin,
-                    RegistryVersion.version,
-                    RegistryVersion.tarball_uri,
-                )
-                .join(
-                    RegistryVersion,
-                    RegistryVersion.repository_id == RegistryRepository.id,
-                )
-                .where(
-                    RegistryRepository.origin == origin,
-                    RegistryVersion.version == version,
-                    RegistryRepository.organization_id
-                    == config.TRACECAT__DEFAULT_ORG_ID,
-                )
+    for origin, version in origins.items():
+        key = _artifact_cache_key(origin, version, organization_id)
+        cached = await _artifact_cache.get(key=key)
+        if cached is not None:
+            cached_artifacts.append(cached)
+        else:
+            misses.append((origin, version))
+
+    # If no misses, return cached results
+    if not misses:
+        return sorted(cached_artifacts, key=lambda x: x.origin)
+
+    # Batch fetch all misses in a single DB query
+    fetched_artifacts: list[RegistryArtifactsContext] = []
+    async with get_async_session_context_manager() as session:
+        # Build OR conditions for all misses
+        conditions = [
+            and_(
+                RegistryRepository.origin == origin,
+                RegistryVersion.version == version,
             )
-            result = await session.execute(statement)
-            row = result.first()
+            for origin, version in misses
+        ]
 
-            if row and row[2] is not None:
-                # Only include if tarball_uri exists (required after migration)
-                artifacts.append(
-                    RegistryArtifactsContext(
-                        origin=str(row[0]),
-                        version=str(row[1]),
-                        tarball_uri=str(row[2]),
-                    )
+        statement = (
+            select(
+                RegistryRepository.origin,
+                RegistryVersion.version,
+                RegistryVersion.tarball_uri,
+            )
+            .join(
+                RegistryVersion,
+                RegistryVersion.repository_id == RegistryRepository.id,
+            )
+            .where(
+                RegistryRepository.organization_id == organization_id,
+                or_(*conditions),
+            )
+        )
+        result = await session.execute(statement)
+        rows = result.all()
+
+        # Build a lookup for found rows
+        found: dict[tuple[str, str], RegistryArtifactsContext] = {}
+        for row in rows:
+            origin_val, version_val, tarball_uri = row
+            if tarball_uri is not None:
+                artifact = RegistryArtifactsContext(
+                    origin=str(origin_val),
+                    version=str(version_val),
+                    tarball_uri=str(tarball_uri),
                 )
-            elif row:
+                found[(str(origin_val), str(version_val))] = artifact
+            else:
                 logger.warning(
                     "Registry version found but missing tarball_uri",
-                    origin=origin,
-                    version=version,
+                    origin=origin_val,
+                    version=version_val,
                 )
+
+        # Cache results and collect artifacts
+        for origin, version in misses:
+            artifact = found.get((origin, version))
+            if artifact is not None:
+                fetched_artifacts.append(artifact)
+                # Cache the artifact
+                key = _artifact_cache_key(origin, version, organization_id)
+                await _artifact_cache.set(key=key, value=artifact)
             else:
                 logger.warning(
                     "Registry version not found for lock entry",
@@ -222,7 +187,9 @@ async def get_registry_artifacts_for_lock(
                     version=version,
                 )
 
-    return artifacts
+    # Combine cached and fetched artifacts
+    all_artifacts = cached_artifacts + fetched_artifacts
+    return sorted(all_artifacts, key=lambda x: x.origin)
 
 
 async def _run_action_direct(*, action: BoundRegistryAction, args: ArgsT) -> Any:
@@ -248,27 +215,6 @@ async def _run_action_direct(*, action: BoundRegistryAction, args: ArgsT) -> Any
         raise e
 
 
-async def run_single_action(
-    *,
-    action: BoundRegistryAction,
-    args: ArgsT,
-    context: ExecutionContext,
-) -> Any:
-    """Run a UDF async."""
-    if action.is_template:
-        logger.info("Running template action async", action=action.name)
-        result = await run_template_action(action=action, args=args, context=context)
-    else:
-        logger.trace("Running UDF async", action=action.name)
-        # Get secrets from context
-        secrets = context.get(ExprContext.SECRETS, {})
-        flat_secrets = secrets_manager.flatten_secrets(secrets)
-        with secrets_manager.env_sandbox(flat_secrets):
-            result = await _run_action_direct(action=action, args=args)
-
-    return result
-
-
 async def run_template_action(
     *,
     action: BoundRegistryAction,
@@ -279,7 +225,7 @@ async def run_template_action(
     if not action.template_action:
         raise ValueError(
             "Attempted to run a non-template UDF as a template. "
-            "Please use `run_single_action` instead."
+            "UDFs should be executed directly via the executor backend."
         )
     defn = action.template_action.definition
 
@@ -292,25 +238,27 @@ async def run_template_action(
         validated_args = action.validate_args(args=args)
 
     secrets_context = {}
-    env_context = {}
+    env_context = DSLEnvironment()
     vars_context = {}
     if context is not None:
-        secrets_context = context.get(ExprContext.SECRETS, {})
-        env_context = context.get(ExprContext.ENV, {})
-        vars_context = context.get(ExprContext.VARS, {})
+        secrets_context = context.get("SECRETS", {})
+        env_context = context.get("ENV", DSLEnvironment())
+        vars_context = context.get("VARS", {})
 
-    template_context = cast(
-        ExecutionContext,
-        {
-            ExprContext.SECRETS: secrets_context,
-            ExprContext.ENV: env_context,
-            ExprContext.VARS: vars_context,
-            ExprContext.TEMPLATE_ACTION_INPUTS: validated_args,
-            ExprContext.TEMPLATE_ACTION_STEPS: {},
-        },
+    template_context = TemplateExecutionContext(
+        SECRETS=secrets_context,
+        ENV=env_context,
+        VARS=vars_context,
+        inputs=validated_args,
+        steps={},
     )
     logger.info("Running template action", action=defn.action)
+    return await _run_template_steps(defn, template_context)
 
+
+async def _run_template_steps(
+    defn: TemplateActionDefinition, template_context: TemplateExecutionContext
+) -> Any:
     for step in defn.steps:
         evaled_args = cast(
             ArgsT,
@@ -323,22 +271,59 @@ async def run_template_action(
                 action_name=step.action, mode="execution"
             )
         logger.trace("Running action step", step_action=step_action.action)
-        result = await run_single_action(
+        result = await _run_single_template_step(
             action=step_action,
             args=evaled_args,
             context=template_context,
         )
         # Store the result of the step
         logger.trace("Storing step result", step=step.ref, result=result)
-        template_context[ExprContext.TEMPLATE_ACTION_STEPS][step.ref] = TaskResult(
-            result=result,
-            result_typename=type(result).__name__,
-        )
+        template_context["steps"][step.ref] = TaskResult.from_result(
+            result
+        ).to_materialized_dict()
 
     # Handle returns
     return eval_templated_object(
         defn.returns, operand=cast(ExprOperand, template_context)
     )
+
+
+async def _run_single_template_step(
+    *,
+    action: BoundRegistryAction,
+    args: ArgsT,
+    context: TemplateExecutionContext,
+) -> Any:
+    """Run a UDF async."""
+    if action.is_template:
+        logger.info("Running template action async", action=action.name)
+        if not action.template_action:
+            raise ValueError("Template action missing template_action")
+        defn = action.template_action.definition
+
+        # Validate args against nested template's expects and create fresh context
+        # with nested template's own inputs, but reuse parent's SECRETS/ENV/VARS
+        validated_args: dict[str, Any] = {}
+        if defn.expects:
+            validated_args = action.validate_args(args=args)
+
+        nested_context = TemplateExecutionContext(
+            SECRETS=context.get("SECRETS", {}),
+            ENV=context.get("ENV", DSLEnvironment()),
+            VARS=context.get("VARS", {}),
+            inputs=validated_args,
+            steps={},
+        )
+        result = await _run_template_steps(defn, nested_context)
+    else:
+        logger.trace("Running UDF async", action=action.name)
+        # Get secrets from context
+        secrets = context.get("SECRETS", {})
+        flat_secrets = secrets_manager.flatten_secrets(secrets)
+        with secrets_manager.env_sandbox(flat_secrets):
+            result = await _run_action_direct(action=action, args=args)
+
+    return result
 
 
 async def _prepare_step_context(
@@ -354,26 +339,10 @@ async def _prepare_step_context(
     from the parent template's prepare_resolved_context() call which fetches
     all secrets recursively.
     """
-    # Only fetch action impl (lightweight - no secret fetching)
-    async with RegistryActionsService.with_session() as service:
-        reg_action = await service.get_action(step_action)
-
-    impl = RegistryActionImplValidator.validate_python(reg_action.implementation)
-    if impl.type == "template":
-        action_impl = ActionImplementation(
-            type="template",
-            action_name=step_action,
-            template_definition=impl.template_action.definition.model_dump(mode="json"),
-            origin=reg_action.origin,
-        )
-    else:
-        action_impl = ActionImplementation(
-            type="udf",
-            action_name=step_action,
-            module=impl.module,
-            name=impl.name,
-            origin=impl.url,
-        )
+    # Resolve action implementation via registry resolver (O(1) manifest-based lookup)
+    action_impl = await registry_resolver.resolve_action(
+        step_action, input.registry_lock, role.organization_id
+    )
 
     # Mint new executor token for step (required for SDK authentication)
     if role.workspace_id is None:
@@ -436,21 +405,18 @@ async def _execute_template_action(
     # Build template context for expression evaluation
     # Secrets context uses the pre-resolved secrets from parent
     secrets_context = resolved_context.secrets
-    env_context = input.exec_context.get(ExprContext.ENV, {})
+    env_context = input.exec_context.get("ENV", DSLEnvironment())
     vars_context = resolved_context.variables
 
     # The evaluated_args are the template's input arguments
     validated_input_args = resolved_context.evaluated_args
 
-    template_context = cast(
-        ExecutionContext,
-        {
-            ExprContext.SECRETS: secrets_context,
-            ExprContext.ENV: env_context,
-            ExprContext.VARS: vars_context,
-            ExprContext.TEMPLATE_ACTION_INPUTS: validated_input_args,
-            ExprContext.TEMPLATE_ACTION_STEPS: {},
-        },
+    template_context = TemplateExecutionContext(
+        SECRETS=secrets_context,
+        ENV=env_context,
+        VARS=vars_context,
+        inputs=validated_input_args,
+        steps={},
     )
 
     logger.info(
@@ -470,9 +436,7 @@ async def _execute_template_action(
         # Evaluate step args with template context
         evaled_args = cast(
             dict[str, Any],
-            eval_templated_object(
-                step.args, operand=cast(ExprOperand, template_context)
-            ),
+            eval_templated_object(step.args, operand=template_context),
         )
 
         # Prepare step context (reuses parent secrets, no re-fetch)
@@ -508,17 +472,14 @@ async def _execute_template_action(
                 info=ExecutorActionErrorInfo.from_exc(e, action_name=step.action)
             ) from e
 
-        # Store step result for subsequent steps
-        template_context[ExprContext.TEMPLATE_ACTION_STEPS][step.ref] = TaskResult(
-            result=step_result,
-            result_typename=type(step_result).__name__,
-        )
+        # Store step result for subsequent steps (materialized for expression access)
+        template_context["steps"][step.ref] = TaskResult.from_result(
+            step_result
+        ).to_materialized_dict()
         logger.trace("Template step completed", step_ref=step.ref)
 
     # Evaluate returns expression with final template context
-    return eval_templated_object(
-        template_def.returns, operand=cast(ExprOperand, template_context)
-    )
+    return eval_templated_object(template_def.returns, operand=template_context)
 
 
 async def _invoke_step(
@@ -575,48 +536,6 @@ async def _invoke_step(
             )
 
 
-async def _get_registry_pythonpath(input: RunActionInput, role: Role) -> str | None:
-    """Get the PYTHONPATH for the current registry version.
-
-    Uses the same logic as run_action_in_subprocess to get artifacts.
-    Returns a colon-separated path including all registry tarballs.
-    """
-    if config.TRACECAT__LOCAL_REPOSITORY_ENABLED:
-        return None
-
-    # Get artifacts from registry (S3 wheelhouse/tarball)
-    tarball_uris: list[str] = []
-    try:
-        if input.registry_lock:
-            logger.debug(
-                "Resolving registry artifacts from lock",
-                registry_lock=input.registry_lock,
-            )
-            artifacts = await get_registry_artifacts_for_lock(input.registry_lock)
-        else:
-            artifacts = await get_registry_artifacts_cached(role)
-
-        for artifact in artifacts:
-            if artifact.tarball_uri:
-                tarball_uris.append(artifact.tarball_uri)
-    except Exception as e:
-        logger.warning("Failed to load registry artifacts metadata", error=str(e))
-        return None
-
-    if not tarball_uris:
-        return None
-
-    # Use ActionRunner to ensure all registry environments are set up
-    runner = get_action_runner()
-    paths: list[str] = []
-    for tarball_uri in tarball_uris:
-        target_dir = await runner.ensure_registry_environment(tarball_uri=tarball_uri)
-        if target_dir:
-            paths.append(str(target_dir))
-
-    return ":".join(paths) if paths else None
-
-
 @dataclass
 class PreparedContext:
     """Context prepared for execution, including resolved secrets and masking info."""
@@ -641,30 +560,13 @@ async def prepare_resolved_context(
     task = input.task
     action_name = task.action
 
-    # Get action implementation from DB without importing modules
-    async with RegistryActionsService.with_session() as service:
-        reg_action = await service.get_action(action_name)
-        action_secrets = await service.fetch_all_action_secrets(reg_action)
-        # NOTE: We don't call get_bound() here to avoid importing the module
-        # before tarball paths are added to sys.path (which happens in the backend)
-
-    # Build action implementation metadata directly from JSONB
-    impl = RegistryActionImplValidator.validate_python(reg_action.implementation)
-    if impl.type == "template":
-        action_impl = ActionImplementation(
-            type="template",
-            action_name=action_name,
-            template_definition=impl.template_action.definition.model_dump(mode="json"),
-            origin=reg_action.origin,
-        )
-    else:
-        action_impl = ActionImplementation(
-            type="udf",
-            action_name=action_name,
-            module=impl.module,
-            name=impl.name,
-            origin=impl.url,
-        )
+    # Resolve action implementation and secrets via registry resolver (O(1) manifest-based lookup)
+    action_impl = await registry_resolver.resolve_action(
+        action_name, input.registry_lock, role.organization_id
+    )
+    action_secrets = await registry_resolver.collect_action_secrets_from_manifest(
+        action_name, input.registry_lock, role.organization_id
+    )
 
     # Collect expressions to know what secrets/variables are needed
     collected = collect_expressions(task.args)
@@ -697,8 +599,8 @@ async def prepare_resolved_context(
 
     # Build execution context for SDK calls
     context = input.exec_context.copy()
-    context[ExprContext.SECRETS] = secrets
-    context[ExprContext.VARS] = workspace_variables
+    context["SECRETS"] = secrets
+    context["VARS"] = workspace_variables
 
     # Extract and set logical_time BEFORE evaluating args
     # This ensures FN.now(), FN.utcnow(), FN.today() use the deterministic time
@@ -774,8 +676,8 @@ async def invoke_once(
     action_name = input.task.action
     timeout = config.TRACECAT__EXECUTOR_CLIENT_TIMEOUT
 
-    # Ensure registry environment is set up (for tarball extraction)
-    await _get_registry_pythonpath(input, role)
+    # Prefetch registry lock manifests into cache for O(1) resolution
+    await registry_resolver.prefetch_lock(input.registry_lock, role.organization_id)
 
     try:
         # Prepare resolved context (secrets, variables, action impl, evaluated args)

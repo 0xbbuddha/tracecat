@@ -21,11 +21,13 @@ import importlib
 import os
 import uuid
 from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
+from tracecat.dsl.schemas import ExecutionContext
 from tracecat.executor.schemas import ExecutorBackendType
 
 if TYPE_CHECKING:
@@ -260,27 +262,35 @@ def simple_action_input_factory() -> Callable[..., RunActionInput]:
     """
     from tracecat.dsl.schemas import ActionStatement, RunActionInput, RunContext
     from tracecat.identifiers.workflow import ExecutionUUID, WorkflowUUID
+    from tracecat.registry.lock.types import RegistryLock
 
     def _create(
         action: str = "core.transform.reshape",
         args: dict | None = None,
         ref: str = "benchmark_action",
-        registry_lock: dict[str, str] | None = None,
+        registry_lock: RegistryLock | None = None,
     ) -> RunActionInput:
         wf_id = WorkflowUUID.new_uuid4()
         exec_id = ExecutionUUID.new_uuid4()
+        # Provide a default registry lock for testing
+        if registry_lock is None:
+            registry_lock = RegistryLock(
+                origins={"tracecat_registry": "test-version"},
+                actions={action: "tracecat_registry"},
+            )
         return RunActionInput(
             task=ActionStatement(
                 action=action,
                 args=args or {"value": {"benchmark": True}},
                 ref=ref,
             ),
-            exec_context={},
+            exec_context=ExecutionContext(ACTIONS={}, TRIGGER=None),
             run_context=RunContext(
                 wf_id=wf_id,
                 wf_exec_id=f"{wf_id.short()}/{exec_id.short()}",
                 wf_run_id=uuid.uuid4(),
                 environment="default",
+                logical_time=datetime.now(UTC),
             ),
             registry_lock=registry_lock,
         )

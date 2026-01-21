@@ -448,15 +448,13 @@ async def commit_workflow(
     # We should only instantiate action refs at workflow runtime
     service = WorkflowDefinitionsService(session, role=role)
 
-    # Get the workflow's current registry_lock
-    # If no lock exists (e.g., legacy workflow), compute one from latest versions
-    registry_lock = workflow.registry_lock
-    if registry_lock is None:
-        lock_service = RegistryLockService(session, role)
-        registry_lock = await lock_service.get_latest_versions_lock()
-        # Also update the workflow with the computed lock
-        if registry_lock:
-            workflow.registry_lock = registry_lock
+    # Always resolve registry_lock from current DSL actions
+    # This ensures the lock reflects the actual actions in the workflow, not stale data
+    lock_service = RegistryLockService(session, role)
+    action_names = {action.action for action in dsl.actions}
+    registry_lock = await lock_service.resolve_lock_with_bindings(action_names)
+    # Update the workflow with the newly computed lock
+    workflow.registry_lock = registry_lock.model_dump()
 
     # Creating a workflow definition only uses refs
     # Copy the alias from the draft workflow to the committed definition
